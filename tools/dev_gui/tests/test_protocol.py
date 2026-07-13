@@ -49,6 +49,12 @@ class TestBuildCmdFrame:
         assert data[0] == CanCmd.AssignId
         assert data[1] == 7
 
+    def test_clear_id_broadcast(self):
+        arb_id, data = build_cmd_frame(0, CanCmd.ClearId)
+        assert arb_id == CAN_CMD_BASE  # 0x100 broadcast
+        assert data[0] == CanCmd.ClearId
+        assert CanCmd.ClearId == 0x07
+
     def test_max_8_bytes(self):
         _, data = build_cmd_frame(1, CanCmd.SetConfig, bytes(range(20)))
         assert len(data) <= 8

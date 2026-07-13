@@ -8,10 +8,10 @@ namespace vfm {
 
 // LED service for the status LED and the two user IO LEDs.
 //
-// Two independent blink channels:
-//   1. Status LED  (PIN_STATUS_LED) – reserved for fault indication;
-//      also slow-blinks during discovery wait.
-//   2. IO LED 9    (PIN_LED_IO_9)   – boot / discovery indication.
+// Blink channels:
+//   1. Status LED  (PIN_STATUS_LED) – fault / discovery indication
+//   2. LED 9       (PIN_LED_IO_9)   – boot / discovery / button-hold warning
+//   3. LED 10      (PIN_LED_IO_10)  – optional blink; used for clear confirm flash
 //
 // All LEDs are digital (on/off). RGB or PWM extensions can be added later.
 class LedService {
@@ -22,64 +22,75 @@ public:
     pinMode(PIN_STATUS_LED, OUTPUT);
     pinMode(PIN_LED_IO_9, OUTPUT);
     pinMode(PIN_LED_IO_10, OUTPUT);
-    setStatus(false);
-    setIoLed(false);
+    setStatusLed(false);
+    setLed9(false);
     setLed10(false);
     return ServiceStatus::Ok;
   }
 
   // --- Direct on/off controls ---
-  void setStatus(bool on) { digitalWrite(PIN_STATUS_LED, on ? HIGH : LOW); }
-  void setIoLed(bool on) { digitalWrite(PIN_LED_IO_9, on ? HIGH : LOW); }
-  void setLed10(bool on) { digitalWrite(PIN_LED_IO_10, on ? HIGH : LOW); }
+  void setStatusLed(bool on) { digitalWrite(PIN_STATUS_LED, on ? HIGH : LOW); }
+  void setLed9(bool on)      { digitalWrite(PIN_LED_IO_9,   on ? HIGH : LOW); }
+  void setLed10(bool on)     { digitalWrite(PIN_LED_IO_10,  on ? HIGH : LOW); }
 
-  // --- Status LED blink channel ---
-  // Blink status LED at the given interval. Pass 0 to stop blinking.
-  void setBlinkIntervalMs(uint32_t ms) {
-    blinkMs_ = ms;
-    blinkStart_ = millis();
-    statusOn_ = false;
+  // --- Blink channels (pass 0 to stop) ---
+  void setStatusLedBlinkMs(uint32_t ms) {
+    statusBlinkMs_    = ms;
+    statusBlinkStart_ = millis();
+    statusOn_         = false;
   }
 
-  // --- IO LED 9 blink channel ---
-  // Blink IO LED 9 at the given interval. Pass 0 to stop blinking.
-  void setIoBlinkIntervalMs(uint32_t ms) {
-    ioBlinkMs_ = ms;
-    ioBlinkStart_ = millis();
-    ioOn_ = false;
+  void setLed9BlinkMs(uint32_t ms) {
+    led9BlinkMs_    = ms;
+    led9BlinkStart_ = millis();
+    led9On_         = false;
   }
 
-  // Tick both blink channels; call from loop().
+  void setLed10BlinkMs(uint32_t ms) {
+    led10BlinkMs_    = ms;
+    led10BlinkStart_ = millis();
+    led10On_         = false;
+  }
+
+  // Tick all blink channels; call from loop().
   void update() {
-    // Status LED blink channel
-    if (blinkMs_ > 0) {
-      if ((millis() - blinkStart_) >= blinkMs_) {
-        blinkStart_ = millis();
+    if (statusBlinkMs_ > 0) {
+      if ((millis() - statusBlinkStart_) >= statusBlinkMs_) {
+        statusBlinkStart_ = millis();
         statusOn_ = !statusOn_;
-        setStatus(statusOn_);
+        setStatusLed(statusOn_);
       }
     }
 
-    // IO LED 9 blink channel
-    if (ioBlinkMs_ > 0) {
-      if ((millis() - ioBlinkStart_) >= ioBlinkMs_) {
-        ioBlinkStart_ = millis();
-        ioOn_ = !ioOn_;
-        setIoLed(ioOn_);
+    if (led9BlinkMs_ > 0) {
+      if ((millis() - led9BlinkStart_) >= led9BlinkMs_) {
+        led9BlinkStart_ = millis();
+        led9On_ = !led9On_;
+        setLed9(led9On_);
+      }
+    }
+
+    if (led10BlinkMs_ > 0) {
+      if ((millis() - led10BlinkStart_) >= led10BlinkMs_) {
+        led10BlinkStart_ = millis();
+        led10On_ = !led10On_;
+        setLed10(led10On_);
       }
     }
   }
 
 private:
-  // Status LED blink state
-  uint32_t blinkMs_ = 0;
-  uint32_t blinkStart_ = 0;
-  bool statusOn_ = false;
+  uint32_t statusBlinkMs_    = 0;
+  uint32_t statusBlinkStart_ = 0;
+  bool     statusOn_         = false;
 
-  // IO LED 9 blink state
-  uint32_t ioBlinkMs_ = 0;
-  uint32_t ioBlinkStart_ = 0;
-  bool ioOn_ = false;
+  uint32_t led9BlinkMs_    = 0;
+  uint32_t led9BlinkStart_ = 0;
+  bool     led9On_         = false;
+
+  uint32_t led10BlinkMs_    = 0;
+  uint32_t led10BlinkStart_ = 0;
+  bool     led10On_         = false;
 };
 
 } // namespace vfm

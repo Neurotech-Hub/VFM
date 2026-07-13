@@ -91,7 +91,7 @@ static void handleSerialLine(const char *line) {
         printStatus();
     } else if (strcmp(line, "clr") == 0) {
         gVfm.identity().clearId();
-        Serial.println(F("NVS id cleared. Reset to trigger first-boot discovery."));
+        Serial.println(F("NVS id cleared. Node waits for AEI / discovery to ANNOUNCE."));
     } else if (strcmp(line, "h") == 0 || strcmp(line, "help") == 0) {
         printHelp();
     } else {

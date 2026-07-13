@@ -53,6 +53,9 @@ public:
     // Force an immediate heartbeat regardless of the heartbeat timer.
     void sendHeartbeatNow();
 
+    // Duration PIN_BTN must be held continuously to trigger an NVS ID clear.
+    void setButtonHoldMs(uint32_t ms) { btnHoldMs_ = ms; }
+
 private:
     DispenserService dispenser_;
     CanService       can_;
@@ -62,11 +65,17 @@ private:
     bool     presence_;
     uint16_t touchThreshold_;
 
-    // Translates DispenserService events into CanService event frames and
-    // feeds the current state into periodic heartbeats.
+    // Button (PIN_BTN, active LOW) long-press state
+    uint32_t btnHoldMs_       = 3000; // required hold duration
+    uint32_t btnPressStartMs_ = 0;    // millis() when button first went LOW
+    bool     btnWasPressed_   = false;
+    bool     btnArmed_        = false; // true once hold threshold reached
+
     void handleDispenserEvents();
     void sendHeartbeatIfDue();
     void updateTouch();
+    void updateButton();
+    void flashLedsClear();            // visual confirmation of NVS clear
 };
 
 } // namespace vfm

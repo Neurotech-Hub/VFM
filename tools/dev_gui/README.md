@@ -127,5 +127,9 @@ tools/dev_gui/
 | node → base   | `0x082`          | ACK                           |
 | node → base   | `0x083`          | REJOIN (returning node)       |
 
+Broadcast command opcodes include `ClearId` (`0x07`) — the GUI **Clear All IDs**
+button sends this so every node wipes its NVS ID, drops AEO, and re-enters
+discovery for a fresh assign pass.
+
 BNC IN/OUT activity is not a CAN frame — it is logged in the event log with
 `frame_type="BNC"` for a unified timeline alongside CAN traffic.

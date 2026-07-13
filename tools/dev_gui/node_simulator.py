@@ -70,7 +70,7 @@ except ImportError:
     from enum import IntEnum
 
     class CanCmd(IntEnum):
-        Ping=0x01; Dispense=0x02; Abort=0x03; AssignId=0x04; SetConfig=0x05; ReqStatus=0x06
+        Ping=0x01; Dispense=0x02; Abort=0x03; AssignId=0x04; SetConfig=0x05; ReqStatus=0x06; ClearId=0x07
 
     class CanEvent(IntEnum):
         PelletLoaded=0x01; PelletPresented=0x02; PelletTaken=0x03; Fault=0x04; Pong=0x05
@@ -304,6 +304,15 @@ class NodeSimulator:
                 old_id = node.node_id
                 node.node_id = data[1]
                 print(f"  [SIM] Node {node.index+1}: ID changed {old_id} → {node.node_id}", flush=True)
+
+            elif cmd == CanCmd.ClearId:
+                print(f"  [SIM] Node {node.node_id}: ClearId — NVS cleared, awaiting re-ASSIGN", flush=True)
+                node.node_id = None
+                node.phase = SimNodePhase.WaitAssign
+                node.dispense_state = DispenseState.Idle
+                node.pg1 = node.pg2 = node.pg3 = False
+                # Re-announce so the base can re-assign (simulates WaitAEI→Announce)
+                self._send_announce(node)
 
     def _advance_dispense(self, node: SimNode, now: float) -> None:
         elapsed = now - node.dispense_step_time

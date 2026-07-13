@@ -371,7 +371,14 @@ class VFMApp:
                            callback=lambda: self._broadcast(CanCmd.Ping))
             dpg.add_button(label="ReqStatus All", width=110,
                            callback=lambda: self._broadcast(CanCmd.ReqStatus))
-            dpg.add_spacer(width=20)
+            dpg.add_spacer(width=12)
+            dpg.add_button(
+                tag="clear_ids_btn",
+                label="Clear All IDs",
+                width=120,
+                callback=self._on_clear_all_ids,
+            )
+            dpg.add_spacer(width=12)
             dpg.add_button(
                 tag="discovery_btn",
                 label="⟳ Start Discovery",
@@ -833,6 +840,28 @@ class VFMApp:
         if self._discovery:
             self._discovery.reset()
         dpg.configure_item("discovery_btn", label="⟳ Re-discover")
+
+    def _on_clear_all_ids(self) -> None:
+        """
+        Broadcast CanCmd.ClearId so every node wipes its NVS ID, drops AEO,
+        and re-enters WaitAEI. Then restart discovery so the base drives AEO
+        HIGH and re-assigns IDs from scratch.
+        """
+        self._broadcast(CanCmd.ClearId)
+        if self._registry:
+            for node in self._registry.all_nodes():
+                node.mac = None
+                node.discovery_state = "Pending"
+                node.online = False
+                node.last_heartbeat_time = None
+                self._refresh_tile(node.node_id)
+        if self._discovery:
+            # Brief pause so nodes process ClearId and drop AEO before we
+            # drive AEO HIGH again for the fresh discovery pass.
+            time.sleep(0.15)
+            self._discovery.reset()
+        dpg.configure_item("discovery_btn", label="⟳ Re-discover")
+        dpg.set_value("discovery_status_text", "  IDs cleared — rediscovering…")
 
     def _on_node_discovered(self, node) -> None:
         if self._registry:

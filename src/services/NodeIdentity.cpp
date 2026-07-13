@@ -119,6 +119,11 @@ void NodeIdentity::clearId() {
     prefs_.remove(kNvsKeyNodeId);
     prefs_.end();
     nodeId_ = 0;
+    can_.setNodeId(0);
+    // Drop AEO so the daisy chain re-sequences from the base on next discovery.
+    digitalWrite(PIN_AEO, LOW);
+    assignPending_ = false;
+    discoveryState_ = DiscoveryState::WaitAEI;
 }
 
 // ---------------------------------------------------------------------------

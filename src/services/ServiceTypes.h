@@ -51,6 +51,7 @@ enum class CanCmd : uint8_t {
     AssignId  = 0x04, // payload byte[1] = new nodeId
     SetConfig = 0x05, // payload TBD
     ReqStatus = 0x06,
+    ClearId   = 0x07, // clear NVS id; re-enter discovery (broadcast-friendly)
 };
 
 // ---------------------------------------------------------------------------

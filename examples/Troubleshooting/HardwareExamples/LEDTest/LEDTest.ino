@@ -12,8 +12,8 @@
 //   a  – all LEDs on
 //   o  – all LEDs off
 //   1  – status LED only
-//   2  – IO9 LED only
-//   3  – IO10 LED only
+//   2  – LED 9 only
+//   3  – LED 10 only
 //   r  – resume auto cycle
 
 #include <VFM.h>
@@ -29,8 +29,8 @@ uint8_t autoStep = 0;
 uint32_t lastStepMs = 0;
 
 void allOff() {
-    leds.setStatus(false);
-    leds.setIoLed(false);
+    leds.setStatusLed(false);
+    leds.setLed9(false);
     leds.setLed10(false);
 }
 
@@ -38,16 +38,16 @@ void showStep(uint8_t step) {
     allOff();
     switch (step % 3) {
         case 0:
-            leds.setStatus(true);
+            leds.setStatusLed(true);
             Serial.println(F("[LED] Status (GPIO39)"));
             break;
         case 1:
-            leds.setIoLed(true);
-            Serial.println(F("[LED] IO9 (GPIO9)"));
+            leds.setLed9(true);
+            Serial.println(F("[LED] LED9 (GPIO9)"));
             break;
         case 2:
             leds.setLed10(true);
-            Serial.println(F("[LED] IO10 (GPIO10)"));
+            Serial.println(F("[LED] LED10 (GPIO10)"));
             break;
     }
 }
@@ -57,7 +57,7 @@ void setup() {
     while (!Serial && millis() < 3000) {}
 
     Serial.println(F("\n===== VFM LEDTest ====="));
-    Serial.println(F("GPIO39 = Status  |  GPIO9 = IO9  |  GPIO10 = IO10"));
+    Serial.println(F("GPIO39 = Status  |  GPIO9 = LED9  |  GPIO10 = LED10"));
     Serial.println(F("Auto cycle running. Commands: a=all on  o=all off  1/2/3=single  r=auto"));
 
     if (leds.begin() != vfm::ServiceStatus::Ok) {
@@ -83,8 +83,8 @@ void loop() {
     switch (cmd) {
         case 'a':
             mode = Mode::Manual;
-            leds.setStatus(true);
-            leds.setIoLed(true);
+            leds.setStatusLed(true);
+            leds.setLed9(true);
             leds.setLed10(true);
             Serial.println(F("[LED] All ON"));
             break;
@@ -96,20 +96,20 @@ void loop() {
         case '1':
             mode = Mode::Manual;
             allOff();
-            leds.setStatus(true);
+            leds.setStatusLed(true);
             Serial.println(F("[LED] Status only"));
             break;
         case '2':
             mode = Mode::Manual;
             allOff();
-            leds.setIoLed(true);
-            Serial.println(F("[LED] IO9 only"));
+            leds.setLed9(true);
+            Serial.println(F("[LED] LED9 only"));
             break;
         case '3':
             mode = Mode::Manual;
             allOff();
             leds.setLed10(true);
-            Serial.println(F("[LED] IO10 only"));
+            Serial.println(F("[LED] LED10 only"));
             break;
         case 'r':
             mode = Mode::Auto;

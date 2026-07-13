@@ -26,6 +26,7 @@ class CanCmd(IntEnum):
     AssignId  = 0x04  # payload byte[0] = new nodeId
     SetConfig = 0x05  # payload TBD
     ReqStatus = 0x06
+    ClearId   = 0x07  # clear NVS id; node re-enters discovery
 
 
 class CanEvent(IntEnum):

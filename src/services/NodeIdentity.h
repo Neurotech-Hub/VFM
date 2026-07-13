@@ -63,7 +63,9 @@ public:
     // Persists to NVS and drives AEO HIGH if not already Enabled.
     void assignId(uint8_t id);
 
-    // Clear the NVS id (forces first-boot discovery on next reset).
+    // Clear the NVS id, drop the live CAN node ID, drop AEO LOW, and re-enter
+    // WaitAEI so the node will ANNOUNCE once the base drives AEO HIGH again.
+    // Used by the local long-press button and by CanCmd::ClearId.
     void clearId();
 
 private:

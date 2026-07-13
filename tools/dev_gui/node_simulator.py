@@ -129,6 +129,7 @@ class SimNode:
     last_heartbeat: float = field(default_factory=time.time)
     dispense_step_time: float = 0.0
     dispense_step: int = 0
+    hb_interval: float = 5.0  # per-node heartbeat interval (s), configurable via SetConfig
 
     @property
     def mac(self) -> bytes:
@@ -157,7 +158,8 @@ class NodeSimulator:
     PRESENTED_DELAY = 2.0
     TAKEN_DELAY_MIN = 3.0
     TAKEN_DELAY_MAX = 5.0
-    HB_INTERVAL     = 1.0
+    HB_INTERVAL     = 5.0  # default node heartbeat interval (s)
+    CONFIG_HEARTBEAT_INTERVAL = 0x01
 
     def __init__(
         self,
@@ -185,7 +187,7 @@ class NodeSimulator:
         self._running = True
 
         for i in range(self._num_nodes):
-            node = SimNode(index=i)
+            node = SimNode(index=i, hb_interval=self.HB_INTERVAL)
             self._nodes[i] = node
 
         # Stagger announce/rejoin slightly so the base station can handle them
@@ -242,7 +244,7 @@ class NodeSimulator:
             now = time.time()
             for node in self._nodes.values():
                 if node.phase == SimNodePhase.Enabled or node.phase == SimNodePhase.Dispensing:
-                    if now - node.last_heartbeat >= self.HB_INTERVAL:
+                    if now - node.last_heartbeat >= node.hb_interval:
                         self._send_heartbeat(node)
                         node.last_heartbeat = now
                     if node.phase == SimNodePhase.Dispensing:
@@ -282,6 +284,7 @@ class NodeSimulator:
 
             if cmd == CanCmd.Ping:
                 self._send_event(node, CanEvent.Pong)
+                print(f"  [SIM] Node {node.node_id}: status LED blink (Ping)", flush=True)
 
             elif cmd == CanCmd.Dispense:
                 if node.dispense_state == DispenseState.Idle:
@@ -299,6 +302,12 @@ class NodeSimulator:
 
             elif cmd == CanCmd.ReqStatus:
                 self._send_heartbeat(node)
+
+            elif cmd == CanCmd.SetConfig and len(data) >= 2:
+                if data[1] == self.CONFIG_HEARTBEAT_INTERVAL and len(data) >= 4:
+                    ms = data[2] | (data[3] << 8)
+                    node.hb_interval = ms / 1000.0
+                    print(f"  [SIM] Node {node.node_id}: heartbeat interval set to {node.hb_interval:.2f}s", flush=True)
 
             elif cmd == CanCmd.AssignId and len(data) >= 2:
                 old_id = node.node_id

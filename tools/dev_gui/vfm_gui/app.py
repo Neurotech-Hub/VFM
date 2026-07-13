@@ -19,6 +19,7 @@ import argparse
 import queue
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -39,7 +40,9 @@ from .protocol import (
     parse_event,
     parse_heartbeat,
     parse_discovery,
+    build_setconfig_heartbeat,
     CAN_ID_ANNOUNCE,
+    CAN_ID_ASSIGN,
     CAN_ID_ACK,
     CAN_ID_REJOIN,
     DISCOVERY_IDS,
@@ -50,11 +53,13 @@ from .protocol import (
 # ---------------------------------------------------------------------------
 
 WINDOW_W = 1280
-WINDOW_H = 800
+WINDOW_H = 920        # 1.15x taller viewport (was 800)
 TILE_W   = 280
-TILE_H   = 290
+TILE_H   = 320        # ~1.1x taller node tiles on the control & monitoring screen (was 290)
 LOG_ROWS = 18        # visible rows in the log table before scroll
+LOG_TABLE_HEIGHT = 240  # ~1.1x taller log table (was 220)
 STALE_CHECK_INTERVAL = 1.0  # seconds between staleness sweeps
+DEFAULT_HEARTBEAT_INTERVAL_S = 5.0  # default node heartbeat interval
 
 # Status dot color tags (registered once at startup)
 _COLOR_GREEN  = (60,  200, 80,  255)
@@ -64,6 +69,32 @@ _COLOR_YELLOW = (220, 200, 50,  255)
 _COLOR_RED    = (220, 50,  50,  255)
 _COLOR_GREY   = (120, 120, 120, 255)
 _COLOR_AMBER  = (230, 140, 30,  255)
+
+
+# ---------------------------------------------------------------------------
+# Base-station-side dispense scheduler
+# ---------------------------------------------------------------------------
+# "SetConfig" on a node tile configures a base-station-driven dispense
+# schedule for that node — either a fixed interval, or "chained" to fire a
+# set delay after another node dispenses. This does NOT touch the node's
+# NVS/firmware config; it purely drives CanCmd.Dispense from the GUI.
+
+@dataclass
+class ScheduleConfig:
+    mode: str = "off"                  # "off", "interval", "chained"
+    interval_minutes: float = 10.0
+    chained_node_id: int = 1
+    chained_delay_minutes: float = 5.0
+    next_fire_time: Optional[float] = None   # absolute time.time(), "interval" mode
+    armed_fire_time: Optional[float] = None  # absolute time.time(), "chained" mode
+
+    @property
+    def summary(self) -> str:
+        if self.mode == "interval":
+            return f"Every {self.interval_minutes:g} min"
+        if self.mode == "chained":
+            return f"{self.chained_delay_minutes:g} min after Node {self.chained_node_id}"
+        return "Off"
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +131,10 @@ class VFMApp:
         self._log_filter_node = 0                # 0 = all
         self._log_filter_type = "All"
         self._show_heartbeats = False
+        self._hb_interval_s = DEFAULT_HEARTBEAT_INTERVAL_S
+
+        # Base-station-side dispense scheduler (per node_id)
+        self._schedules: Dict[int, ScheduleConfig] = {}
 
     # ------------------------------------------------------------------
     # Entry point
@@ -118,10 +153,22 @@ class VFMApp:
         )
         dpg.setup_dearpygui()
         dpg.show_viewport()
-        dpg.set_render_callback(self._on_render)
+        if hasattr(dpg, "set_render_callback"):
+            dpg.set_render_callback(self._on_render)
+        else:
+            dpg.set_frame_callback(1, self._make_render_callback())
         dpg.start_dearpygui()
         self._shutdown()
         dpg.destroy_context()
+
+    def _make_render_callback(self):
+        """Return a frame callback that reschedules itself for the next frame."""
+        def _frame_callback() -> None:
+            self._on_render()
+            if hasattr(dpg, "get_frame_count"):
+                dpg.set_frame_callback(dpg.get_frame_count() + 1, _frame_callback)
+
+        return _frame_callback
 
     # ------------------------------------------------------------------
     # Theme + Fonts
@@ -151,10 +198,8 @@ class VFMApp:
         dpg.bind_theme(global_theme)
 
     def _setup_fonts(self) -> None:
-        with dpg.font_registry():
-            # Default font (DearPyGui built-in)
-            default = dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
-        # Monospace font for the log — use default if no system font available
+        # Character ranges are automatic in current DearPyGui; keep default font.
+        # Monospace font for the log — use default if no system font available.
         self._mono_font = None
 
     # ------------------------------------------------------------------
@@ -362,6 +407,12 @@ class VFMApp:
 
     def _build_broadcast_bar(self) -> None:
         with dpg.group(horizontal=True):
+            dpg.add_button(
+                label="Clear All IDs",
+                width=110,
+                callback=self._on_clear_all_ids,
+            )
+            dpg.add_spacer(width=12)
             dpg.add_text("Broadcast:", color=(160, 165, 175, 255))
             dpg.add_button(label="Dispense All",  width=110,
                            callback=lambda: self._broadcast(CanCmd.Dispense))
@@ -373,19 +424,28 @@ class VFMApp:
                            callback=lambda: self._broadcast(CanCmd.ReqStatus))
             dpg.add_spacer(width=12)
             dpg.add_button(
-                tag="clear_ids_btn",
-                label="Clear All IDs",
-                width=120,
-                callback=self._on_clear_all_ids,
-            )
-            dpg.add_spacer(width=12)
-            dpg.add_button(
                 tag="discovery_btn",
-                label="⟳ Start Discovery",
-                width=140,
+                label="Re-discover",
+                width=110,
                 callback=self._on_start_discovery,
             )
-            dpg.add_text("", tag="discovery_status_text", color=(100, 200, 100, 255))
+            dpg.add_spacer(width=12)
+            dpg.add_text("Heartbeat (s):", color=(160, 165, 175, 255))
+            dpg.add_input_float(
+                tag="hb_interval_input",
+                default_value=DEFAULT_HEARTBEAT_INTERVAL_S,
+                width=70,
+                min_value=0.1,
+                max_value=120.0,
+                min_clamped=True,
+                max_clamped=True,
+                step=0.5,
+            )
+            dpg.add_button(
+                label="Apply HB",
+                width=80,
+                callback=self._on_apply_heartbeat_interval,
+            )
 
     def _build_node_grid(self, num_nodes: int) -> None:
         cols = min(num_nodes, 3)
@@ -398,7 +458,7 @@ class VFMApp:
             borders_outerV=False,
         ):
             for _ in range(cols):
-                dpg.add_table_column(width_fixed=True, init_width=TILE_W + 12)
+                dpg.add_table_column(width_fixed=True, init_width_or_weight=TILE_W + 12)
 
             row_tag = None
             for i, node_id in enumerate(range(1, num_nodes + 1)):
@@ -412,12 +472,15 @@ class VFMApp:
         with dpg.child_window(width=TILE_W, height=TILE_H, border=True):
 
             # -- Header row: label + status dot --
+            # DearPyGui always passes (sender, app_data, user_data); defaults on
+            # lambda params are overridden by None unless user_data= is set.
             with dpg.group(horizontal=True):
                 tags["label_input"] = dpg.add_input_text(
                     default_value=f"Node {node_id}",
                     width=TILE_W - 90,
                     on_enter=True,
-                    callback=lambda s, a, u=node_id: self._on_label_change(u, a),
+                    user_data=node_id,
+                    callback=lambda s, a, u: self._on_label_change(u, a),
                 )
                 tags["status_dot"] = dpg.add_text("●", color=_COLOR_GREY)
                 tags["status_text"] = dpg.add_text("OFFLINE", color=_COLOR_GREY)
@@ -425,9 +488,8 @@ class VFMApp:
             # -- Identity --
             dpg.add_separator()
             with dpg.group():
-                tags["can_id_text"]  = dpg.add_text(f"CAN ID : {node_id}")
-                tags["mac_text"]     = dpg.add_text("MAC    : —")
-                tags["disc_text"]    = dpg.add_text("Disc   : Pending")
+                tags["can_id_text"]  = dpg.add_text(f"ID  : {node_id}")
+                tags["mac_text"]     = dpg.add_text("MAC : —")
 
             dpg.add_separator()
 
@@ -456,25 +518,28 @@ class VFMApp:
             # -- Command buttons --
             with dpg.group(horizontal=True):
                 dpg.add_button(
-                    label="Dispense", width=85,
-                    callback=lambda s, a, u=node_id: self._send_cmd(u, CanCmd.Dispense),
+                    label="Dispense", width=85, user_data=node_id,
+                    callback=lambda s, a, u: self._send_cmd(u, CanCmd.Dispense),
                 )
                 dpg.add_button(
-                    label="Abort", width=70,
-                    callback=lambda s, a, u=node_id: self._send_cmd(u, CanCmd.Abort),
+                    label="Abort", width=70, user_data=node_id,
+                    callback=lambda s, a, u: self._send_cmd(u, CanCmd.Abort),
                 )
                 dpg.add_button(
-                    label="Ping", width=55,
-                    callback=lambda s, a, u=node_id: self._send_cmd(u, CanCmd.Ping),
+                    label="Ping", width=55, user_data=node_id,
+                    callback=lambda s, a, u: self._send_cmd(u, CanCmd.Ping),
                 )
             with dpg.group(horizontal=True):
                 dpg.add_button(
-                    label="ReqStatus", width=90,
-                    callback=lambda s, a, u=node_id: self._send_cmd(u, CanCmd.ReqStatus),
+                    label="ReqStatus", width=90, user_data=node_id,
+                    callback=lambda s, a, u: self._send_cmd(u, CanCmd.ReqStatus),
                 )
                 dpg.add_button(
-                    label="SetConfig", width=90, enabled=False,
-                )  # placeholder — protocol TBD
+                    label="SetConfig", width=90, user_data=node_id,
+                    callback=lambda s, a, u: self._on_open_schedule_dialog(u),
+                )
+
+            tags["schedule_text"] = dpg.add_text("Schedule: Off", color=(160, 165, 175, 255))
 
             # -- AssignId override --
             with dpg.group(horizontal=True):
@@ -485,7 +550,8 @@ class VFMApp:
                 )
                 dpg.add_button(
                     label="AssignId",
-                    callback=lambda s, a, u=(node_id, tags): self._on_assign_id(u[0], u[1]),
+                    user_data=node_id,
+                    callback=lambda s, a, u: self._on_assign_id(u),
                 )
 
         self._node_tiles[node_id] = tags
@@ -520,21 +586,25 @@ class VFMApp:
             dpg.add_separator()
             dpg.add_input_text(
                 label="Label", default_value=cfg.label, width=150,
-                callback=lambda s, a, u=cfg: setattr(u, "label", a),
+                user_data=cfg,
+                callback=lambda s, a, u: setattr(u, "label", a),
             )
             dpg.add_combo(
                 label="Edge", items=["rising", "falling", "both"],
                 default_value=cfg.edge, width=100,
-                callback=lambda s, a, u=cfg: setattr(u, "edge", a),
+                user_data=cfg,
+                callback=lambda s, a, u: setattr(u, "edge", a),
             )
             dpg.add_input_text(
                 label="Action (placeholder)", default_value=cfg.action, width=180,
                 hint="e.g. dispense_all, log_event, ...",
-                callback=lambda s, a, u=cfg: setattr(u, "action", a),
+                user_data=cfg,
+                callback=lambda s, a, u: setattr(u, "action", a),
             )
             dpg.add_checkbox(
                 label="Enabled", default_value=cfg.enabled,
-                callback=lambda s, a, u=cfg: setattr(u, "enabled", a),
+                user_data=cfg,
+                callback=lambda s, a, u: setattr(u, "enabled", a),
             )
             tags["last_text"] = dpg.add_text("Last: —", color=(160, 165, 175, 255))
         self._bnc_tiles[key] = tags
@@ -549,23 +619,27 @@ class VFMApp:
             dpg.add_separator()
             dpg.add_input_text(
                 label="Label", default_value=cfg.label, width=150,
-                callback=lambda s, a, u=cfg: setattr(u, "label", a),
+                user_data=cfg,
+                callback=lambda s, a, u: setattr(u, "label", a),
             )
             dpg.add_input_int(
                 label="Pulse (us)", default_value=cfg.pulse_width_us, width=100,
                 min_value=1, max_value=1_000_000, min_clamped=True, max_clamped=True,
-                callback=lambda s, a, u=cfg: setattr(u, "pulse_width_us", a),
+                user_data=cfg,
+                callback=lambda s, a, u: setattr(u, "pulse_width_us", a),
             )
             dpg.add_input_text(
                 label="Trigger (placeholder)", default_value=cfg.trigger, width=180,
                 hint="e.g. pellet_taken, any_event, fault, ...",
-                callback=lambda s, a, u=cfg: setattr(u, "trigger", a),
+                user_data=cfg,
+                callback=lambda s, a, u: setattr(u, "trigger", a),
             )
             dpg.add_checkbox(
                 label="Enabled", default_value=cfg.enabled,
-                callback=lambda s, a, u=cfg: setattr(u, "enabled", a),
+                user_data=cfg,
+                callback=lambda s, a, u: setattr(u, "enabled", a),
             )
-            dpg.add_button(label="Manual Pulse", callback=self._on_bnc_manual_pulse)
+            dpg.add_button(label="Manual Pulse", callback=lambda s, a, u: self._on_bnc_manual_pulse())
         self._bnc_tiles["bnc_out"] = tags
 
     def _build_log_panel(self) -> None:
@@ -606,15 +680,15 @@ class VFMApp:
             borders_outerV=True,
             scrollY=True,
             freeze_rows=1,
-            height=220,
+            height=LOG_TABLE_HEIGHT,
             policy=dpg.mvTable_SizingFixedFit,
         ):
-            dpg.add_table_column(label="Time",      width_fixed=True, init_width=95)
-            dpg.add_table_column(label="Node",      width_fixed=True, init_width=60)
-            dpg.add_table_column(label="Dir",       width_fixed=True, init_width=35)
-            dpg.add_table_column(label="Type",      width_fixed=True, init_width=90)
-            dpg.add_table_column(label="Event",     width_fixed=True, init_width=150)
-            dpg.add_table_column(label="ID",        width_fixed=True, init_width=55)
+            dpg.add_table_column(label="Time",      width_fixed=True, init_width_or_weight=95)
+            dpg.add_table_column(label="Node",      width_fixed=True, init_width_or_weight=60)
+            dpg.add_table_column(label="Dir",       width_fixed=True, init_width_or_weight=35)
+            dpg.add_table_column(label="Type",      width_fixed=True, init_width_or_weight=90)
+            dpg.add_table_column(label="Event",     width_fixed=True, init_width_or_weight=150)
+            dpg.add_table_column(label="ID",        width_fixed=True, init_width_or_weight=55)
             dpg.add_table_column(label="Data",      width_stretch=True)
             dpg.add_table_column(label="Details",   width_stretch=True)
 
@@ -645,7 +719,6 @@ class VFMApp:
         # 2. Tick discovery timeout
         if self._discovery:
             self._discovery.tick()
-            self._update_discovery_status_text()
 
         # 3. Staleness check (once per second)
         now = time.time()
@@ -654,6 +727,9 @@ class VFMApp:
             if self._registry:
                 self._registry.check_staleness()
             self._refresh_all_tiles()
+
+        # 3b. Base-station dispense scheduler (interval + chained modes)
+        self._tick_schedulers(now)
 
         # 4. Refresh log table if new entries
         if messages or bnc_events:
@@ -692,6 +768,8 @@ class VFMApp:
                     self._refresh_tile(node_id)
                     entry_name = ev.event.name
                     self._maybe_fire_bnc_out(entry_name)
+                    if ev.event == CanEvent.PelletPresented:
+                        self._arm_chained_schedules(node_id)
 
         elif ftype == "DISCOVERY":
             node_id = 0
@@ -709,7 +787,22 @@ class VFMApp:
                     details += f" id={info['node_id']}"
                 # Route to discovery manager
                 if self._discovery:
-                    self._discovery.handle_frame(arb_id, data)
+                    handled = self._discovery.handle_frame(arb_id, data)
+                    # Log the ASSIGN we just sent in response to ANNOUNCE
+                    if handled and arb_id == CAN_ID_ANNOUNCE and self._log:
+                        pending_mac = self._discovery.pending_mac
+                        pending_id = self._discovery.pending_id
+                        if pending_mac is not None and pending_id is not None:
+                            self._log.add(LogEntry(
+                                timestamp=time.time(),
+                                direction="TX",
+                                node_id=pending_id,
+                                frame_type="DISCOVERY",
+                                event_name="ASSIGN",
+                                raw_id=CAN_ID_ASSIGN,
+                                raw_data=pending_mac + bytes([pending_id]),
+                                details=f"MAC={format_mac(pending_mac)} id={pending_id}",
+                            ))
             node_id = 0
 
         else:
@@ -746,18 +839,19 @@ class VFMApp:
         dpg.configure_item(tags["status_dot"],  color=color)
         dpg.configure_item(tags["status_text"], default_value=node.status_label, color=color)
         dpg.set_value(tags["label_input"],      node.label)
-        dpg.configure_item(tags["mac_text"],    default_value=f"MAC    : {node.mac_str}")
-        dpg.configure_item(tags["disc_text"],   default_value=f"Disc   : {node.discovery_state}")
+        dpg.configure_item(tags["mac_text"],    default_value=f"MAC : {node.mac_str}")
 
-        # Heartbeat age
+        # Heartbeat age — thresholds scale with the configured heartbeat
+        # interval so a healthy beat at any interval reads as normal.
         age = node.heartbeat_age_s
+        expected = max(self._hb_interval_s, 0.1)
         if age is None:
             hb_str = "—"
             hb_color = _COLOR_GREY
-        elif age > 5:
+        elif age > expected * 3:
             hb_str = f"{age:.1f}s ago"
             hb_color = _COLOR_RED
-        elif age > 2:
+        elif age > expected * 1.5:
             hb_str = f"{age:.1f}s ago"
             hb_color = _COLOR_AMBER
         else:
@@ -836,32 +930,30 @@ class VFMApp:
     # Discovery UI
     # ------------------------------------------------------------------
 
-    def _on_start_discovery(self) -> None:
+    def _on_start_discovery(self, sender=None, app_data=None, user_data=None) -> None:
+        """
+        'Re-discover' — re-opens the discovery window (pulses AEO) so any
+        newly-connected nodes ANNOUNCE and get assigned, and previously
+        assigned nodes REJOIN. Does NOT clear any node's saved NVS ID and
+        does NOT wipe existing registry state — use 'Clear All IDs' for that.
+        """
         if self._discovery:
-            self._discovery.reset()
-        dpg.configure_item("discovery_btn", label="⟳ Re-discover")
+            self._discovery.rediscover()
 
-    def _on_clear_all_ids(self) -> None:
+    def _on_clear_all_ids(self, sender=None, app_data=None, user_data=None) -> None:
         """
-        Broadcast CanCmd.ClearId so every node wipes its NVS ID, drops AEO,
-        and re-enters WaitAEI. Then restart discovery so the base drives AEO
-        HIGH and re-assigns IDs from scratch.
+        Broadcasts ClearId so all nodes wipe their saved NVS ID and re-enter
+        WaitAEI, then pulses AEO to trigger fresh ANNOUNCE from every node.
         """
-        self._broadcast(CanCmd.ClearId)
         if self._registry:
             for node in self._registry.all_nodes():
                 node.mac = None
                 node.discovery_state = "Pending"
                 node.online = False
                 node.last_heartbeat_time = None
-                self._refresh_tile(node.node_id)
+            self._refresh_all_tiles()
         if self._discovery:
-            # Brief pause so nodes process ClearId and drop AEO before we
-            # drive AEO HIGH again for the fresh discovery pass.
-            time.sleep(0.15)
             self._discovery.reset()
-        dpg.configure_item("discovery_btn", label="⟳ Re-discover")
-        dpg.set_value("discovery_status_text", "  IDs cleared — rediscovering…")
 
     def _on_node_discovered(self, node) -> None:
         if self._registry:
@@ -880,16 +972,7 @@ class VFMApp:
             ))
 
     def _on_discovery_complete(self) -> None:
-        dpg.set_value("discovery_status_text", "  Discovery complete")
-
-    def _update_discovery_status_text(self) -> None:
-        if not self._discovery:
-            return
-        if self._discovery.is_running:
-            dpg.set_value("discovery_status_text", "  Discovering…")
-        elif self._discovery.is_complete:
-            n = len(self._discovery.discovered_nodes)
-            dpg.set_value("discovery_status_text", f"  {n} node(s) found")
+        pass
 
     # ------------------------------------------------------------------
     # Command helpers
@@ -908,12 +991,13 @@ class VFMApp:
                 event_name=cmd.name,
                 raw_id=0x100 + node_id,
                 raw_data=bytes([cmd.value]) + payload,
+                details="" if ok else "send failed",
             ))
 
-    def _broadcast(self, cmd: CanCmd) -> None:
+    def _broadcast(self, cmd: CanCmd, payload: bytes = b"") -> None:
         if not self._can:
             return
-        self._can.send_broadcast(cmd)
+        self._can.send_broadcast(cmd, payload)
         if self._log:
             self._log.add(LogEntry(
                 timestamp=time.time(),
@@ -922,12 +1006,203 @@ class VFMApp:
                 frame_type="COMMAND",
                 event_name=f"{cmd.name} (broadcast)",
                 raw_id=0x100,
-                raw_data=bytes([cmd.value]),
+                raw_data=bytes([cmd.value]) + payload,
             ))
 
-    def _on_assign_id(self, node_id: int, tags: dict) -> None:
-        new_id = dpg.get_value(tags["assign_input"])
-        self._send_cmd(node_id, CanCmd.AssignId, bytes([new_id]))
+    def _on_apply_heartbeat_interval(self, sender=None, app_data=None, user_data=None) -> None:
+        """Broadcast a SetConfig frame so every node adopts the new heartbeat interval."""
+        seconds = dpg.get_value("hb_interval_input") if dpg.does_item_exist("hb_interval_input") else DEFAULT_HEARTBEAT_INTERVAL_S
+        seconds = max(0.1, float(seconds))
+        self._hb_interval_s = seconds
+        payload = build_setconfig_heartbeat(int(seconds * 1000))
+        self._broadcast(CanCmd.SetConfig, payload)
+
+    def _on_assign_id(self, node_id: int) -> None:
+        """
+        Assign / reassign a node ID via discovery ASSIGN (0x081).
+
+        Only works when the node's MAC is known from a previous ANNOUNCE or
+        REJOIN — that MAC-addressed frame ensures only the targeted node
+        accepts the assignment. Does NOT broadcast.
+        """
+        tags = self._node_tiles.get(node_id)
+        if tags is None:
+            return
+        new_id = int(dpg.get_value(tags["assign_input"]))
+        if not (1 <= new_id <= 254):
+            return
+
+        node = self._registry.get(node_id) if self._registry else None
+        mac = node.mac if node else None
+
+        if not mac or mac == bytes(6):
+            if self._log:
+                self._log.add(LogEntry(
+                    timestamp=time.time(),
+                    direction="TX",
+                    node_id=node_id,
+                    frame_type="ERROR",
+                    event_name="AssignId",
+                    raw_id=0,
+                    raw_data=b"",
+                    details="MAC unknown — run discovery first",
+                ))
+            return
+
+        ok = self._can.send_assign(mac, new_id)
+        if self._log:
+            self._log.add(LogEntry(
+                timestamp=time.time(),
+                direction="TX",
+                node_id=new_id,
+                frame_type="DISCOVERY",
+                event_name="ASSIGN",
+                raw_id=CAN_ID_ASSIGN,
+                raw_data=mac + bytes([new_id]),
+                details=f"MAC={format_mac(mac)} → id={new_id}"
+                        + ("" if ok else " (send failed)"),
+            ))
+
+    # ------------------------------------------------------------------
+    # Dispense scheduler (SetConfig button)
+    # ------------------------------------------------------------------
+
+    def _on_open_schedule_dialog(self, node_id: int) -> None:
+        """Open a modal letting the user set a flexible dispense schedule for one node."""
+        if dpg.does_item_exist("schedule_modal"):
+            dpg.delete_item("schedule_modal")
+
+        cfg = self._schedules.get(node_id, ScheduleConfig())
+        mode_labels = {
+            "off": "Off",
+            "interval": "Every X minutes",
+            "chained": "X minutes after node Y dispenses",
+        }
+        num_nodes = self._registry.num_nodes() if self._registry else 9
+        other_nodes = [str(i) for i in range(1, num_nodes + 1) if i != node_id]
+        default_y = str(cfg.chained_node_id) if str(cfg.chained_node_id) in other_nodes else (other_nodes[0] if other_nodes else "")
+
+        with dpg.window(
+            tag="schedule_modal",
+            label=f"SetConfig — Node {node_id} Dispense Schedule",
+            modal=True,
+            no_resize=True,
+            width=360,
+            height=260,
+            pos=((WINDOW_W - 360) // 2, (WINDOW_H - 260) // 2),
+        ):
+            dpg.add_text(f"Dispense schedule for Node {node_id}", color=(100, 180, 255, 255))
+            dpg.add_separator()
+            dpg.add_radio_button(
+                tag="schedule_mode_radio",
+                items=list(mode_labels.values()),
+                default_value=mode_labels[cfg.mode],
+            )
+            dpg.add_spacer(height=6)
+            dpg.add_input_float(
+                tag="schedule_minutes_input",
+                label="Minutes",
+                default_value=(cfg.interval_minutes if cfg.mode == "interval" else cfg.chained_delay_minutes),
+                width=120,
+                min_value=0.1,
+                max_value=1440.0,
+                min_clamped=True,
+                max_clamped=True,
+            )
+            dpg.add_combo(
+                tag="schedule_nodeY_combo",
+                label="After node",
+                items=other_nodes,
+                default_value=default_y,
+                width=120,
+            )
+            dpg.add_spacer(height=10)
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="Apply", width=90, user_data=node_id,
+                    callback=lambda s, a, u: self._on_apply_schedule(u),
+                )
+                dpg.add_button(
+                    label="Cancel", width=90,
+                    callback=lambda: dpg.delete_item("schedule_modal"),
+                )
+
+    def _on_apply_schedule(self, node_id: int) -> None:
+        if not dpg.does_item_exist("schedule_mode_radio"):
+            return
+        mode_label = dpg.get_value("schedule_mode_radio")
+        minutes = float(dpg.get_value("schedule_minutes_input"))
+        node_y_str = dpg.get_value("schedule_nodeY_combo")
+
+        cfg = self._schedules.get(node_id, ScheduleConfig())
+        if mode_label == "Every X minutes":
+            cfg.mode = "interval"
+            cfg.interval_minutes = max(0.1, minutes)
+            cfg.next_fire_time = time.time() + cfg.interval_minutes * 60.0
+            cfg.armed_fire_time = None
+        elif mode_label == "X minutes after node Y dispenses":
+            cfg.mode = "chained"
+            cfg.chained_delay_minutes = max(0.1, minutes)
+            cfg.chained_node_id = int(node_y_str) if node_y_str else cfg.chained_node_id
+            cfg.next_fire_time = None
+            cfg.armed_fire_time = None
+        else:
+            cfg.mode = "off"
+            cfg.next_fire_time = None
+            cfg.armed_fire_time = None
+
+        self._schedules[node_id] = cfg
+        self._refresh_schedule_text(node_id)
+
+        if self._log:
+            self._log.add(LogEntry(
+                timestamp=time.time(),
+                direction="TX",
+                node_id=node_id,
+                frame_type="COMMAND",
+                event_name="SetConfig (schedule)",
+                raw_id=0,
+                raw_data=b"",
+                details=cfg.summary,
+            ))
+
+        dpg.delete_item("schedule_modal")
+
+    def _refresh_schedule_text(self, node_id: int) -> None:
+        tags = self._node_tiles.get(node_id)
+        cfg = self._schedules.get(node_id)
+        if tags is None or "schedule_text" not in tags:
+            return
+        summary = cfg.summary if cfg else "Off"
+        dpg.configure_item(
+            tags["schedule_text"],
+            default_value=f"Schedule: {summary}",
+            color=(160, 165, 175, 255) if (cfg is None or cfg.mode == "off") else (100, 200, 100, 255),
+        )
+
+    def _arm_chained_schedules(self, source_node_id: int) -> None:
+        """
+        Called when `source_node_id` fires a PelletPresented event. Any node
+        whose schedule is chained to this node gets its one-shot dispense
+        timer (re-)armed for `chained_delay_minutes` from now.
+        """
+        now = time.time()
+        for node_id, cfg in self._schedules.items():
+            if cfg.mode == "chained" and cfg.chained_node_id == source_node_id:
+                cfg.armed_fire_time = now + cfg.chained_delay_minutes * 60.0
+
+    def _tick_schedulers(self, now: float) -> None:
+        """Fire Dispense commands for nodes whose schedule is due. Call once per frame."""
+        for node_id, cfg in self._schedules.items():
+            if cfg.mode == "interval" and cfg.next_fire_time is not None:
+                if now >= cfg.next_fire_time:
+                    self._send_cmd(node_id, CanCmd.Dispense)
+                    cfg.next_fire_time = now + cfg.interval_minutes * 60.0
+            elif cfg.mode == "chained" and cfg.armed_fire_time is not None:
+                if now >= cfg.armed_fire_time:
+                    self._send_cmd(node_id, CanCmd.Dispense)
+                    cfg.armed_fire_time = None
 
     # ------------------------------------------------------------------
     # BNC / Sync I/O

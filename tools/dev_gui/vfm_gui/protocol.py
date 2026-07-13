@@ -77,6 +77,13 @@ DISCOVERY_IDS = {CAN_ID_ANNOUNCE, CAN_ID_ASSIGN, CAN_ID_ACK, CAN_ID_REJOIN}
 
 
 # ---------------------------------------------------------------------------
+# SetConfig sub-types (mirror of ServiceTypes.h ConfigType)
+# ---------------------------------------------------------------------------
+# SetConfig payload: [configType(1), value...]
+CONFIG_HEARTBEAT_INTERVAL = 0x01  # value = uint16 LE, heartbeat interval in ms
+
+
+# ---------------------------------------------------------------------------
 # Heartbeat payload (mirror of CanService.h HeartbeatPayload)
 # ---------------------------------------------------------------------------
 # byte 0: DispenseState
@@ -190,6 +197,17 @@ def build_cmd_frame(node_id: int, cmd: CanCmd, payload: bytes = b"") -> tuple[in
     arb_id = CAN_CMD_BASE + node_id  # 0x100 when node_id==0
     data = bytes([cmd.value]) + payload
     return arb_id, data[:8]  # CAN max 8 bytes
+
+
+def build_setconfig_heartbeat(interval_ms: int) -> bytes:
+    """
+    Build the payload (after the SetConfig command byte) that sets the
+    node's heartbeat emission interval.
+
+    Payload: [CONFIG_HEARTBEAT_INTERVAL, ms_lo, ms_hi]
+    """
+    interval_ms = max(0, min(int(interval_ms), 0xFFFF))
+    return bytes([CONFIG_HEARTBEAT_INTERVAL]) + struct.pack("<H", interval_ms)
 
 
 def build_assign_frame(mac: bytes, node_id: int) -> tuple[int, bytes]:

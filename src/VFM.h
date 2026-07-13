@@ -56,6 +56,10 @@ public:
     // Duration PIN_BTN must be held continuously to trigger an NVS ID clear.
     void setButtonHoldMs(uint32_t ms) { btnHoldMs_ = ms; }
 
+    // Briefly blink the status LED (e.g. in response to a received Ping) so
+    // the physical node can be located on the bench. Non-blocking.
+    void blinkStatusLedForPing();
+
 private:
     DispenserService dispenser_;
     CanService       can_;
@@ -66,15 +70,22 @@ private:
     uint16_t touchThreshold_;
 
     // Button (PIN_BTN, active LOW) long-press state
-    uint32_t btnHoldMs_       = 3000; // required hold duration
+    uint32_t btnHoldMs_       = 1000; // required hold duration
     uint32_t btnPressStartMs_ = 0;    // millis() when button first went LOW
     bool     btnWasPressed_   = false;
     bool     btnArmed_        = false; // true once hold threshold reached
+
+    // Status LED blink triggered by a received Ping (visual "which node" aid)
+    static constexpr uint32_t kPingBlinkMs         = 1500; // total blink duration
+    static constexpr uint32_t kPingBlinkPeriodMs   = 150;  // blink toggle period
+    uint32_t pingBlinkUntilMs_ = 0;    // millis() deadline; 0 = not blinking
+    bool     pingBlinkActive_  = false;
 
     void handleDispenserEvents();
     void sendHeartbeatIfDue();
     void updateTouch();
     void updateButton();
+    void updatePingBlink();
     void flashLedsClear();            // visual confirmation of NVS clear
 };
 

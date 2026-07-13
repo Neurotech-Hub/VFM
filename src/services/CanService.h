@@ -8,8 +8,9 @@
 
 namespace vfm {
 
-// Heartbeat interval when no explicit activity (milliseconds)
-constexpr uint32_t kDefaultHeartbeatIntervalMs = 1000;
+// Heartbeat interval when no explicit activity (milliseconds).
+// User-configurable at runtime via CanCmd::SetConfig / ConfigType::HeartbeatInterval.
+constexpr uint32_t kDefaultHeartbeatIntervalMs = 5000;
 
 // ---------------------------------------------------------------------------
 // Heartbeat payload packed into 8 bytes:

@@ -102,6 +102,8 @@ bool VFM::begin() {
 
                 can_.sendEvent(pong);
 
+                blinkStatusLedForPing();
+
                 break;
 
             }
@@ -109,6 +111,23 @@ bool VFM::begin() {
             case CanCmd::ReqStatus:
 
                 sendHeartbeatNow();
+
+                break;
+
+            case CanCmd::SetConfig:
+
+                if (len >= 1 && static_cast<ConfigType>(payload[0]) == ConfigType::HeartbeatInterval) {
+
+                    if (len >= 3) {
+
+                        uint16_t ms = static_cast<uint16_t>(payload[1]) |
+                                      (static_cast<uint16_t>(payload[2]) << 8);
+
+                        can_.setHeartbeatIntervalMs(ms);
+
+                    }
+
+                }
 
                 break;
 
@@ -188,11 +207,15 @@ void VFM::update() {
 
     sendHeartbeatIfDue();
 
+    updatePingBlink();
 
 
-    // Once discovery completes, turn status / LED 9 off
 
-    if (identity_.isEnabled()) {
+    // Once discovery completes, turn status / LED 9 off — unless a Ping
+    // blink is currently active, which takes precedence so the node stays
+    // visually identifiable for its full blink duration.
+
+    if (identity_.isEnabled() && !pingBlinkActive_) {
 
         leds_.setStatusLedBlinkMs(0);
 
@@ -206,9 +229,13 @@ void VFM::update() {
 
 
 
-    // Status LED solid ON while in Fault state
+    // Status LED solid ON while in Fault state — always wins over a Ping blink.
 
     if (dispenser_.state() == DispenseState::Fault) {
+
+        pingBlinkActive_  = false;
+
+        pingBlinkUntilMs_ = 0;
 
         leds_.setStatusLedBlinkMs(0);
 
@@ -335,6 +362,34 @@ void VFM::sendHeartbeatIfDue() {
 void VFM::sendHeartbeatNow() {
 
     can_.sendHeartbeat(buildHeartbeat(dispenser_, presence_));
+
+}
+
+
+
+void VFM::blinkStatusLedForPing() {
+
+    // Don't interrupt a solid fault indication with a blink.
+    if (dispenser_.state() == DispenseState::Fault) return;
+
+    pingBlinkActive_  = true;
+    pingBlinkUntilMs_ = millis() + kPingBlinkMs;
+    leds_.setStatusLedBlinkMs(kPingBlinkPeriodMs);
+
+}
+
+
+
+void VFM::updatePingBlink() {
+
+    if (!pingBlinkActive_) return;
+
+    if ((int32_t)(millis() - pingBlinkUntilMs_) >= 0) {
+        pingBlinkActive_  = false;
+        pingBlinkUntilMs_ = 0;
+        leds_.setStatusLedBlinkMs(0);
+        leds_.setStatusLed(false);
+    }
 
 }
 

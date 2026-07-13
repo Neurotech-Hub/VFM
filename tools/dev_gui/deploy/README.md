@@ -30,7 +30,7 @@ After reboot, confirm the kernel driver probed the chip:
 
 ```bash
 dmesg | grep -i mcp251x
-ls /dev/spidev0.0        # SPI bus present
+ls /dev/spi*      # SPI bus present
 ip link show can0        # can0 interface exists
 ```
 
@@ -61,7 +61,6 @@ sudo apt install can-utils   # if not already installed
 candump can0
 
 # Terminal 2 (loopback test, no nodes required)
-sudo ip link set can0 down
 sudo ip link set can0 type can bitrate 250000 loopback on
 sudo ip link set can0 up
 cansend can0 123#DEADBEEF   # should be echoed back in Terminal 1

@@ -67,6 +67,13 @@ enum class CanEvent : uint8_t {
 };
 
 // ---------------------------------------------------------------------------
+// SetConfig sub-types (byte[0] of the SetConfig command payload)
+// ---------------------------------------------------------------------------
+enum class ConfigType : uint8_t {
+    HeartbeatInterval = 0x01, // value = uint16 LE, heartbeat interval in ms
+};
+
+// ---------------------------------------------------------------------------
 // Discovery frame IDs  (used by NodeIdentity during boot)
 // ---------------------------------------------------------------------------
 constexpr uint32_t CAN_ID_ANNOUNCE = 0x080; // node -> base: MAC(6)

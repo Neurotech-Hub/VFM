@@ -54,6 +54,14 @@ All CLI arguments pre-fill the setup screen; you can still edit them before clic
 
 ## Node simulator options
 
+Bring up `vcan0` first (required once per boot; does not persist across reboots):
+
+```bash
+sudo modprobe vcan
+sudo ip link add dev vcan0 type vcan
+sudo ip link set up vcan0
+```
+
 ```
 python node_simulator.py --help
 

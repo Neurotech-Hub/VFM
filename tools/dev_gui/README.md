@@ -112,15 +112,38 @@ tools/dev_gui/
 ├── tests/
 │   ├── test_hat.py           # Interactive hardware validation (not pytest)
 │   └── test_*.py             # Automated unit tests (pytest)
-└── vfm_gui/
+├── vfm_gui/
     ├── protocol.py           # CAN protocol constants + parsers
     ├── can_manager.py        # SocketCAN wrapper (threaded RX)
     ├── io_manager.py         # BNC I/O, button, AEO GPIO (non-CAN)
     ├── discovery_manager.py  # ANNOUNCE/ASSIGN/REJOIN via IOManager.drive_aeo()
-    ├── node_registry.py      # Per-node state + identity mapping
+    ├── mac_id_registry.py    # Persistent MAC ↔ Node ID dictionary (~/.vfm/…)
+    ├── node_registry.py      # Per-node live state (session)
     ├── log_manager.py        # Ring buffer + CSV auto-save
     └── app.py                # DearPyGui screens + render loop
 ```
+
+## Persistent MAC ↔ Node ID map
+
+The base station keeps a dictionary of discovered modules in
+`~/.vfm/mac_id_registry.json` (created automatically):
+
+```json
+{
+  "version": 1,
+  "mappings": {
+    "AA:BB:CC:DD:EE:01": 1,
+    "AA:BB:CC:DD:EE:02": 2
+  }
+}
+```
+
+- On **ANNOUNCE**, if the MAC is already in the file the same ID is re-assigned;
+  otherwise the next free ID is used and written to the file after **ACK**.
+- On **REJOIN**, if the node's NVS ID disagrees with the file, the base station
+  sends **ASSIGN** with the historical ID so the mapping stays stable.
+- **Clear All IDs** wipes this file (and broadcasts `ClearId` to node NVS), then
+  rediscovers and rebuilds the dictionary from scratch.
 
 ## CAN frame reference
 
@@ -136,8 +159,8 @@ tools/dev_gui/
 | node → base   | `0x083`          | REJOIN (returning node)       |
 
 Broadcast command opcodes include `ClearId` (`0x07`) — the GUI **Clear All IDs**
-button sends this so every node wipes its NVS ID, drops AEO, and re-enters
-discovery for a fresh assign pass.
+button clears `~/.vfm/mac_id_registry.json`, broadcasts ClearId so every node
+wipes its NVS ID, then rediscovers and rebuilds the MAC↔ID dictionary.
 
 BNC IN/OUT activity is not a CAN frame — it is logged in the event log with
 `frame_type="BNC"` for a unified timeline alongside CAN traffic.

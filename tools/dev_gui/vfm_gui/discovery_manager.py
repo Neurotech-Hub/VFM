@@ -5,19 +5,25 @@ The base station drives the AEO GPIO HIGH to enable the first node, then
 listens for ANNOUNCE (new node, no saved ID) and REJOIN (returning node,
 saved ID) frames on the CAN bus.
 
+When a MacIdRegistry is provided, past MAC↔ID assignments are reused so a
+returning module keeps a stable Node ID across base-station restarts.
+Clear All IDs (reset with ClearId) should clear that registry first so IDs
+are reassigned from scratch.
+
 Discovery flow per node slot:
   1. AEO pin driven HIGH (done once at start, propagates through daisy chain)
   2. Node sends ANNOUNCE(MAC) on 0x080
-  3. Base sends ASSIGN(MAC, nextId) on 0x081
-  4. Node sends ACK(MAC, id) on 0x082 → node is registered, moves to Enabled
+  3. Base sends ASSIGN(MAC, id) on 0x081  — historical id if known, else next free
+  4. Node sends ACK(MAC, id) on 0x082 → node is registered, mapping persisted
   5. Repeat for next node (their AEI goes HIGH after upstream AEO rises)
 
 For returning nodes (NVS has saved ID):
-  Node sends REJOIN(MAC, savedId) on 0x083 → base registers immediately.
+  Node sends REJOIN(MAC, savedId) on 0x083 → base registers immediately,
+  or forces ASSIGN if the saved ID disagrees with the persistent registry.
 
 GPIO note:
   AEO (GPIO27) is driven through the shared IOManager (see io_manager.py),
-  DiscoveryManager just calls io_manager.drive_aeo(). 
+  DiscoveryManager just calls io_manager.drive_aeo().
   On vcan0 / dev machines with no GPIO hardware,
   IOManager degrades to a no-op automatically.
 """
@@ -40,6 +46,7 @@ from .protocol import (
 
 if TYPE_CHECKING:
     from .io_manager import IOManager
+    from .mac_id_registry import MacIdRegistry
 
 # How long to wait for new ANNOUNCE/REJOIN before declaring discovery complete.
 # Generous for real hardware: nodes stay in WaitAEI until AEO is wired/driven.
@@ -66,16 +73,22 @@ class DiscoveryManager:
 
     Usage::
 
-        dm = DiscoveryManager(can_manager, io_manager)
+        dm = DiscoveryManager(can_manager, io_manager, mac_registry)
         dm.on_node_discovered(lambda node: registry.register_node(node.node_id, node.mac))
         dm.start()
         # In render loop:
         dm.handle_frame(msg)  # for each incoming CAN message
     """
 
-    def __init__(self, can_manager, io_manager: "IOManager") -> None:
+    def __init__(
+        self,
+        can_manager,
+        io_manager: "IOManager",
+        mac_registry: Optional["MacIdRegistry"] = None,
+    ) -> None:
         self._can = can_manager
         self._io = io_manager
+        self._mac_registry = mac_registry
         self._phase = DiscoveryPhase.Idle
         self._next_id: int = 1
         self._last_activity: float = 0.0
@@ -110,7 +123,12 @@ class DiscoveryManager:
             clear_first: broadcast ClearId before pulsing AEO so nodes with
                          saved NVS IDs re-enter WaitAEI and re-announce.
         """
-        self._next_id = start_id
+        # Prefer historically reserved IDs: start after the highest known mapping
+        # (or start_id if the registry is empty / not provided).
+        if self._mac_registry is not None and len(self._mac_registry) > 0:
+            self._next_id = self._mac_registry.next_free_id(start_id)
+        else:
+            self._next_id = start_id
         self._discovered.clear()
         self._pending_assign = None
         self._pending_assign_id = None
@@ -136,12 +154,18 @@ class DiscoveryManager:
         """
         Re-open the discovery window WITHOUT clearing any node's saved NVS
         ID. Existing assignments are preserved: already-discovered nodes are
-        kept, and new IDs continue from one past the highest known ID.
-        Returning nodes simply REJOIN; only genuinely new nodes ANNOUNCE.
+        kept, and new IDs continue from one past the highest known ID
+        (session + persistent MAC registry). Returning nodes REJOIN; only
+        genuinely new nodes ANNOUNCE.
         """
-        self._next_id = max(
-            [self._next_id] + [n.node_id for n in self._discovered]
-        ) + 1 if self._discovered else self._next_id
+        known_ids = [n.node_id for n in self._discovered]
+        if self._mac_registry is not None:
+            known_ids.append(self._mac_registry.max_id())
+        known_ids.append(self._next_id - 1)
+        self._next_id = max(known_ids) + 1 if any(i > 0 for i in known_ids) else 1
+        if self._mac_registry is not None:
+            self._next_id = self._mac_registry.next_free_id(self._next_id)
+
         self._pending_assign = None
         self._pending_assign_id = None
         self._last_activity = time.time()
@@ -244,13 +268,13 @@ class DiscoveryManager:
     # ------------------------------------------------------------------
 
     def _handle_announce(self, mac: bytes) -> None:
-        """New node, no saved ID — assign the next available ID."""
+        """New node, no saved NVS ID — assign historical ID if known, else next free."""
         # Retransmit ASSIGN if the node is retrying for the same pending MAC
         if self._pending_assign == mac and self._pending_assign_id is not None:
             self._can.send_assign(mac, self._pending_assign_id)
             return
-        node_id = self._next_id
-        self._next_id += 1
+
+        node_id = self._allocate_id_for_mac(mac)
         self._pending_assign = mac
         self._pending_assign_id = node_id
         self._can.send_assign(mac, node_id)
@@ -262,16 +286,60 @@ class DiscoveryManager:
             self._pending_assign_id = None
             if node_id is None:
                 return
+            if self._mac_registry is not None:
+                self._mac_registry.set(mac, node_id)
             node = DiscoveredNode(node_id=node_id, mac=mac, source="ANNOUNCE")
             self._discovered.append(node)
             if self._node_callback:
                 self._node_callback(node)
 
     def _handle_rejoin(self, mac: bytes, node_id: int) -> None:
-        """Returning node — already has a saved ID from NVS."""
+        """
+        Returning node — already has a saved ID from NVS.
+
+        If the MAC was previously registered under a different ID, force that
+        historical ID via ASSIGN so the base dictionary stays the source of
+        truth across reboots and cable swaps.
+        """
+        if self._mac_registry is not None:
+            known = self._mac_registry.get_id(mac)
+            if known is not None and known != node_id:
+                # Re-align node NVS to the base-station historical ID
+                self._pending_assign = mac
+                self._pending_assign_id = known
+                self._can.send_assign(mac, known)
+                return
+
+            owner = self._mac_registry.get_mac(node_id)
+            if known is None and owner is not None and owner != mac:
+                # This NVS ID is already claimed by a different MAC — re-assign
+                new_id = self._allocate_id_for_mac(mac)
+                self._pending_assign = mac
+                self._pending_assign_id = new_id
+                self._can.send_assign(mac, new_id)
+                return
+
+            # Matching or first-seen REJOIN — remember / confirm the mapping
+            if known is None:
+                self._mac_registry.set(mac, node_id)
+
         if node_id >= self._next_id:
             self._next_id = node_id + 1
         node = DiscoveredNode(node_id=node_id, mac=mac, source="REJOIN")
         self._discovered.append(node)
         if self._node_callback:
             self._node_callback(node)
+
+    def _allocate_id_for_mac(self, mac: bytes) -> int:
+        """Reuse a past ID for this MAC when known; otherwise take the next free ID."""
+        if self._mac_registry is not None:
+            known = self._mac_registry.get_id(mac)
+            if known is not None:
+                return known
+            node_id = self._mac_registry.next_free_id(self._next_id)
+            self._next_id = node_id + 1
+            return node_id
+
+        node_id = self._next_id
+        self._next_id += 1
+        return node_id

@@ -29,6 +29,7 @@ from .can_manager import CanManager
 from .discovery_manager import DiscoveryManager, DiscoveryPhase
 from .io_manager import BNCInputConfig, BNCOutputConfig, IOManager
 from .log_manager import LogEntry, LogManager
+from .mac_id_registry import DEFAULT_REGISTRY_PATH, MacIdRegistry
 from .node_registry import NodeRegistry
 from .protocol import (
     CanCmd,
@@ -110,6 +111,7 @@ class VFMApp:
         self._registry: Optional[NodeRegistry] = None
         self._discovery: Optional[DiscoveryManager] = None
         self._log: Optional[LogManager] = None
+        self._mac_registry = MacIdRegistry(DEFAULT_REGISTRY_PATH)
         self._last_stale_check = 0.0
 
         # IOManager owns all base-station GPIO except CAN (BNC I/O).
@@ -353,7 +355,9 @@ class VFMApp:
         # Create subsystems
         self._registry = NodeRegistry(num_nodes)
         self._log = LogManager(log_dir=log_dir, auto_save=auto_save)
-        self._discovery = DiscoveryManager(self._can, self._io)
+        # Reload persistent MAC↔ID map in case it was edited on disk
+        self._mac_registry.load()
+        self._discovery = DiscoveryManager(self._can, self._io, self._mac_registry)
         self._discovery.on_node_discovered(self._on_node_discovered)
         self._discovery.on_complete(self._on_discovery_complete)
 
@@ -364,6 +368,20 @@ class VFMApp:
             self._registry.register_node(1, b"\x00" * 6, source="MANUAL")
         else:
             self._discovery.start(start_id=1)
+            if self._log and len(self._mac_registry) > 0:
+                self._log.add(LogEntry(
+                    timestamp=time.time(),
+                    direction="SYS",
+                    node_id=0,
+                    frame_type="REGISTRY",
+                    event_name="Loaded",
+                    raw_id=0,
+                    raw_data=b"",
+                    details=(
+                        f"{len(self._mac_registry)} MAC↔ID mapping(s) from "
+                        f"{self._mac_registry.path}"
+                    ),
+                ))
 
         # Transition to main screen
         dpg.delete_item("setup_window")
@@ -942,9 +960,22 @@ class VFMApp:
 
     def _on_clear_all_ids(self, sender=None, app_data=None, user_data=None) -> None:
         """
-        Broadcasts ClearId so all nodes wipe their saved NVS ID and re-enter
-        WaitAEI, then pulses AEO to trigger fresh ANNOUNCE from every node.
+        Wipe the persistent MAC↔ID dictionary, broadcast ClearId so all nodes
+        wipe their saved NVS ID and re-enter WaitAEI, then pulse AEO to trigger
+        fresh ANNOUNCE from every node (IDs reassigned from 1).
         """
+        self._mac_registry.clear()
+        if self._log:
+            self._log.add(LogEntry(
+                timestamp=time.time(),
+                direction="SYS",
+                node_id=0,
+                frame_type="REGISTRY",
+                event_name="Cleared",
+                raw_id=0,
+                raw_data=b"",
+                details=f"MAC↔ID file cleared ({self._mac_registry.path})",
+            ))
         if self._registry:
             for node in self._registry.all_nodes():
                 node.mac = None
@@ -1050,6 +1081,24 @@ class VFMApp:
             return
 
         ok = self._can.send_assign(mac, new_id)
+        # Persist the intentional remapping on the base station immediately
+        self._mac_registry.set(mac, new_id)
+        if self._registry and node is not None:
+            # If the MAC is moving between tile slots, keep UI MAC consistent
+            if new_id != node_id:
+                node.mac = None
+                node.discovery_state = "Pending"
+                dest = self._registry.get(new_id)
+                if dest is not None:
+                    dest.mac = mac
+                    dest.discovery_state = "Enabled"
+                self._refresh_tile(node_id)
+                self._refresh_tile(new_id)
+            else:
+                node.mac = mac
+                node.discovery_state = "Enabled"
+                self._refresh_tile(node_id)
+
         if self._log:
             self._log.add(LogEntry(
                 timestamp=time.time(),

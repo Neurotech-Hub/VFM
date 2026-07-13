@@ -4,9 +4,15 @@ Python desktop application (DearPyGui) for controlling and monitoring VFM foragi
 
 ## Requirements
 
-- Raspberry Pi 5 with CAN HAT (`can0`)
+- Raspberry Pi 5 with the station HAT (`can0`)
 - Python 3.9+
 - Monitor attached (or Raspberry Pi Remote for headless access)
+
+## First-time hardware bring-up
+
+Before running the GUI against real hardware, configure the CAN
+controller device tree overlay and bring up `can0` — see
+[deploy/README.md](deploy/README.md). This only needs to be done once per Pi.
 
 ## Install
 
@@ -65,6 +71,27 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
+## Base station I/O (BNC, AEO, button)
+
+The main screen includes a **BNC / Sync I/O** panel between the node grid and
+the event log:
+
+- **BNC IN 1 / BNC IN 2** — configurable label, edge (rising/falling/both),
+  and a free-text "action" placeholder. A handful of convenience keywords
+  (`dispense_all`, `abort_all`, `ping_all`, `reqstatus_all`) are dispatched
+  automatically when enabled; any other value is just logged, ready to be
+  wired to real behaviour later.
+- **BNC OUT** — configurable label, pulse width (microseconds), and a
+  free-text "trigger" placeholder matched against incoming CAN event names
+  (or `any_event` to match all events). A "Manual Pulse" button fires a
+  one-shot pulse for bench testing regardless of the enable state.
+
+All GPIO for BNC I/O, the user button, and AEO (daisy-chain discovery enable)
+is centralized in [vfm_gui/io_manager.py](vfm_gui/io_manager.py). It degrades
+to a harmless simulation mode automatically when no GPIO backend
+(`gpiod`/`RPi.GPIO`) or hardware is available — e.g. when developing against
+`vcan0` on a non-Pi machine.
+
 ## File structure
 
 ```
@@ -72,10 +99,16 @@ tools/dev_gui/
 ├── requirements.txt
 ├── run.py                    # Entry point
 ├── node_simulator.py         # Fake VFM nodes for vcan0 testing
+├── deploy/                   # One-time Pi setup: MCP2515 device tree overlay,
+│                              # systemd-networkd unit — see deploy/README.md
+├── tests/
+│   ├── test_hat.py           # Interactive hardware validation (not pytest)
+│   └── test_*.py             # Automated unit tests (pytest)
 └── vfm_gui/
     ├── protocol.py           # CAN protocol constants + parsers
     ├── can_manager.py        # SocketCAN wrapper (threaded RX)
-    ├── discovery_manager.py  # AEO GPIO + ANNOUNCE/ASSIGN/REJOIN
+    ├── io_manager.py         # BNC I/O, button, AEO GPIO (non-CAN)
+    ├── discovery_manager.py  # ANNOUNCE/ASSIGN/REJOIN via IOManager.drive_aeo()
     ├── node_registry.py      # Per-node state + identity mapping
     ├── log_manager.py        # Ring buffer + CSV auto-save
     └── app.py                # DearPyGui screens + render loop
@@ -93,3 +126,6 @@ tools/dev_gui/
 | base → node   | `0x081`          | ASSIGN (node ID assignment)   |
 | node → base   | `0x082`          | ACK                           |
 | node → base   | `0x083`          | REJOIN (returning node)       |
+
+BNC IN/OUT activity is not a CAN frame — it is logged in the event log with
+`frame_type="BNC"` for a unified timeline alongside CAN traffic.

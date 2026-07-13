@@ -16,6 +16,8 @@ The DearPyGui render callback fires every frame (~60 fps).  Each frame:
 from __future__ import annotations
 
 import argparse
+import queue
+import subprocess
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -24,6 +26,7 @@ import dearpygui.dearpygui as dpg
 
 from .can_manager import CanManager
 from .discovery_manager import DiscoveryManager, DiscoveryPhase
+from .io_manager import BNCInputConfig, BNCOutputConfig, IOManager
 from .log_manager import LogEntry, LogManager
 from .node_registry import NodeRegistry
 from .protocol import (
@@ -77,6 +80,19 @@ class VFMApp:
         self._discovery: Optional[DiscoveryManager] = None
         self._log: Optional[LogManager] = None
         self._last_stale_check = 0.0
+
+        # IOManager owns all base-station GPIO except CAN (BNC I/O).
+        # Created up front (not tied to CAN session) since it degrades to a
+        # harmless no-op when no GPIO hardware is present.
+        self._io = IOManager()
+
+        # BNC configuration — deliberately free-form placeholders; see
+        # io_manager.BNCInputConfig / BNCOutputConfig docstrings.
+        self._bnc_in1_cfg = BNCInputConfig(label="BNC IN 1")
+        self._bnc_in2_cfg = BNCInputConfig(label="BNC IN 2")
+        self._bnc_out_cfg = BNCOutputConfig(label="BNC OUT")
+        self._bnc_tiles: Dict[str, dict] = {}
+        self._bnc_edge_queue: "queue.Queue[tuple[str, float]]" = queue.Queue(maxsize=256)
 
         # GUI state
         self._screen = "setup"
@@ -173,6 +189,8 @@ class VFMApp:
                     label="Interface",
                     default_value=self._args.interface,
                     width=160,
+                    on_enter=True,
+                    callback=self._on_check_can_status,
                 )
                 dpg.add_input_int(
                     tag="setup_bitrate",
@@ -182,6 +200,10 @@ class VFMApp:
                     min_value=10_000,
                     max_value=1_000_000,
                 )
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Driver status:", color=(160, 165, 175, 255))
+                    dpg.add_text("", tag="setup_can_status", color=_COLOR_GREY)
+                    dpg.add_button(label="Check", width=60, callback=self._on_check_can_status)
 
             dpg.add_spacer(height=6)
 
@@ -232,6 +254,31 @@ class VFMApp:
                 callback=self._on_start_session,
             )
 
+        self._on_check_can_status()
+
+    def _on_check_can_status(self, *_args) -> None:
+        """Check whether the configured SocketCAN interface exists and is UP."""
+        interface = dpg.get_value("setup_interface").strip() if dpg.does_item_exist("setup_interface") else self._args.interface
+        up = self._is_can_interface_up(interface)
+        if up:
+            dpg.configure_item("setup_can_status", default_value=f"● {interface} online", color=_COLOR_GREEN)
+        else:
+            dpg.configure_item("setup_can_status", default_value=f"● {interface} not found", color=_COLOR_RED)
+
+    @staticmethod
+    def _is_can_interface_up(interface: str) -> bool:
+        """Best-effort check via `ip link show <interface>` — never raises."""
+        if not interface:
+            return False
+        try:
+            result = subprocess.run(
+                ["ip", "link", "show", interface],
+                capture_output=True, text=True, timeout=1.0,
+            )
+            return result.returncode == 0 and "UP" in result.stdout
+        except Exception:
+            return False
+
     def _on_start_session(self) -> None:
         interface  = dpg.get_value("setup_interface").strip()
         bitrate    = dpg.get_value("setup_bitrate")
@@ -252,10 +299,16 @@ class VFMApp:
             dpg.set_value("setup_error", f"CAN error: {exc}")
             return
 
+        # Bring up base-station GPIO (BNC I/O, button, AEO). Degrades to a
+        # no-op automatically when no GPIO hardware is present.
+        self._io.begin()
+        self._io.on_bnc_in1_edge(lambda: self._bnc_edge_queue.put(("IN1", time.time())))
+        self._io.on_bnc_in2_edge(lambda: self._bnc_edge_queue.put(("IN2", time.time())))
+
         # Create subsystems
         self._registry = NodeRegistry(num_nodes)
         self._log = LogManager(log_dir=log_dir, auto_save=auto_save)
-        self._discovery = DiscoveryManager(self._can)
+        self._discovery = DiscoveryManager(self._can, self._io)
         self._discovery.on_node_discovered(self._on_node_discovered)
         self._discovery.on_complete(self._on_discovery_complete)
 
@@ -296,6 +349,11 @@ class VFMApp:
 
             # -- Node grid --
             self._build_node_grid(num_nodes)
+            dpg.add_spacer(height=6)
+            dpg.add_separator()
+
+            # -- BNC / Sync I/O --
+            self._build_bnc_panel()
             dpg.add_spacer(height=6)
             dpg.add_separator()
 
@@ -425,6 +483,84 @@ class VFMApp:
 
         self._node_tiles[node_id] = tags
 
+    # ------------------------------------------------------------------
+    # BNC / Sync I/O panel
+    # ------------------------------------------------------------------
+
+    def _build_bnc_panel(self) -> None:
+        dpg.add_text("BNC / Sync I/O", color=(100, 180, 255, 255))
+        dpg.add_text(
+            "Action / Trigger fields are free-text placeholders — not tied to a fixed "
+            "list. Recognized convenience keywords (dispense_all, abort_all, ping_all, "
+            "reqstatus_all for inputs; any_event, fault, or an event name for output) "
+            "are dispatched automatically. Anything else is just logged for now.",
+            color=(140, 145, 155, 255), wrap=WINDOW_W - 40,
+        )
+        with dpg.group(horizontal=True):
+            self._build_bnc_input_box(1, self._bnc_in1_cfg)
+            dpg.add_spacer(width=16)
+            self._build_bnc_input_box(2, self._bnc_in2_cfg)
+            dpg.add_spacer(width=16)
+            self._build_bnc_output_box()
+
+    def _build_bnc_input_box(self, idx: int, cfg: BNCInputConfig) -> None:
+        key = f"bnc_in{idx}"
+        tags: dict = {"last_edge_ts": 0.0}
+        with dpg.child_window(width=300, height=180, border=True):
+            with dpg.group(horizontal=True):
+                tags["dot"] = dpg.add_text("●", color=_COLOR_GREY)
+                dpg.add_text(f"BNC IN {idx}")
+            dpg.add_separator()
+            dpg.add_input_text(
+                label="Label", default_value=cfg.label, width=150,
+                callback=lambda s, a, u=cfg: setattr(u, "label", a),
+            )
+            dpg.add_combo(
+                label="Edge", items=["rising", "falling", "both"],
+                default_value=cfg.edge, width=100,
+                callback=lambda s, a, u=cfg: setattr(u, "edge", a),
+            )
+            dpg.add_input_text(
+                label="Action (placeholder)", default_value=cfg.action, width=180,
+                hint="e.g. dispense_all, log_event, ...",
+                callback=lambda s, a, u=cfg: setattr(u, "action", a),
+            )
+            dpg.add_checkbox(
+                label="Enabled", default_value=cfg.enabled,
+                callback=lambda s, a, u=cfg: setattr(u, "enabled", a),
+            )
+            tags["last_text"] = dpg.add_text("Last: —", color=(160, 165, 175, 255))
+        self._bnc_tiles[key] = tags
+
+    def _build_bnc_output_box(self) -> None:
+        cfg = self._bnc_out_cfg
+        tags: dict = {"last_pulse_ts": 0.0}
+        with dpg.child_window(width=300, height=180, border=True):
+            with dpg.group(horizontal=True):
+                tags["dot"] = dpg.add_text("●", color=_COLOR_GREY)
+                dpg.add_text("BNC OUT")
+            dpg.add_separator()
+            dpg.add_input_text(
+                label="Label", default_value=cfg.label, width=150,
+                callback=lambda s, a, u=cfg: setattr(u, "label", a),
+            )
+            dpg.add_input_int(
+                label="Pulse (us)", default_value=cfg.pulse_width_us, width=100,
+                min_value=1, max_value=1_000_000, min_clamped=True, max_clamped=True,
+                callback=lambda s, a, u=cfg: setattr(u, "pulse_width_us", a),
+            )
+            dpg.add_input_text(
+                label="Trigger (placeholder)", default_value=cfg.trigger, width=180,
+                hint="e.g. pellet_taken, any_event, fault, ...",
+                callback=lambda s, a, u=cfg: setattr(u, "trigger", a),
+            )
+            dpg.add_checkbox(
+                label="Enabled", default_value=cfg.enabled,
+                callback=lambda s, a, u=cfg: setattr(u, "enabled", a),
+            )
+            dpg.add_button(label="Manual Pulse", callback=self._on_bnc_manual_pulse)
+        self._bnc_tiles["bnc_out"] = tags
+
     def _build_log_panel(self) -> None:
         dpg.add_text("Event Log", color=(100, 180, 255, 255))
         with dpg.group(horizontal=True):
@@ -439,7 +575,7 @@ class VFMApp:
             dpg.add_text("Type:", color=(160,165,175,255))
             dpg.add_combo(
                 tag="log_filter_type",
-                items=["All", "EVENT", "COMMAND", "HEARTBEAT", "DISCOVERY"],
+                items=["All", "EVENT", "COMMAND", "HEARTBEAT", "DISCOVERY", "BNC"],
                 default_value="All",
                 width=120,
                 callback=self._refresh_log_table,
@@ -488,6 +624,17 @@ class VFMApp:
         for msg in messages:
             self._dispatch_rx(msg)
 
+        # 1b. Drain BNC edge queue (populated by IOManager's GPIO callback threads)
+        bnc_events = []
+        while True:
+            try:
+                bnc_events.append(self._bnc_edge_queue.get_nowait())
+            except queue.Empty:
+                break
+        for which, ts in bnc_events:
+            self._handle_bnc_edge(which, ts)
+        self._refresh_bnc_dots()
+
         # 2. Tick discovery timeout
         if self._discovery:
             self._discovery.tick()
@@ -502,7 +649,7 @@ class VFMApp:
             self._refresh_all_tiles()
 
         # 4. Refresh log table if new entries
-        if messages:
+        if messages or bnc_events:
             self._refresh_log_table()
 
     # ------------------------------------------------------------------
@@ -537,6 +684,7 @@ class VFMApp:
                     self._registry.update_from_event(node_id, ev.event)
                     self._refresh_tile(node_id)
                     entry_name = ev.event.name
+                    self._maybe_fire_bnc_out(entry_name)
 
         elif ftype == "DISCOVERY":
             node_id = 0
@@ -753,6 +901,99 @@ class VFMApp:
         self._send_cmd(node_id, CanCmd.AssignId, bytes([new_id]))
 
     # ------------------------------------------------------------------
+    # BNC / Sync I/O
+    # ------------------------------------------------------------------
+
+    def _handle_bnc_edge(self, which: str, ts: float) -> None:
+        """Handle a BNC IN1/IN2 edge event drained from the IOManager callback queue."""
+        cfg = self._bnc_in1_cfg if which == "IN1" else self._bnc_in2_cfg
+        tile = self._bnc_tiles.get(f"bnc_{which.lower()}")
+        if tile is not None:
+            tile["last_edge_ts"] = ts
+            dpg.configure_item(tile["dot"], color=_COLOR_GREEN)
+            dpg.set_value(tile["last_text"], f"Last: {time.strftime('%H:%M:%S', time.localtime(ts))}")
+
+        if self._log:
+            self._log.add(LogEntry(
+                timestamp=ts, direction="RX", node_id=0, frame_type="BNC",
+                event_name=f"{which} edge", raw_id=0, raw_data=b"",
+                details=f"label={cfg.label or '—'} action={cfg.action or '(none)'}",
+            ))
+
+        if cfg.enabled and cfg.action:
+            self._dispatch_bnc_action(cfg.action)
+
+    def _dispatch_bnc_action(self, action: str) -> None:
+        """
+        Best-effort dispatch for a handful of convenience keywords. Anything
+        else is a free-form placeholder — it was already logged in
+        _handle_bnc_edge, ready to be wired to real behaviour later.
+        """
+        keyword = action.strip().lower().replace("-", "_")
+        if keyword == "dispense_all":
+            self._broadcast(CanCmd.Dispense)
+        elif keyword == "abort_all":
+            self._broadcast(CanCmd.Abort)
+        elif keyword == "ping_all":
+            self._broadcast(CanCmd.Ping)
+        elif keyword == "reqstatus_all":
+            self._broadcast(CanCmd.ReqStatus)
+        # else: placeholder only — no built-in behaviour yet.
+
+    def _maybe_fire_bnc_out(self, event_name: str) -> None:
+        """
+        Called for every incoming CAN EVENT frame. If BNC OUT is enabled and
+        its (free-form) trigger matches this event, fire a pulse.
+        """
+        cfg = self._bnc_out_cfg
+        if not cfg.enabled or not cfg.trigger:
+            return
+        trigger = cfg.trigger.strip().lower().replace("-", "_")
+        event_key = event_name.strip().lower()
+        matched = trigger in ("any", "any_event", "all") or trigger == event_key
+        if not matched:
+            return
+
+        self._io.pulse_bnc_out(cfg.pulse_width_us)
+        tile = self._bnc_tiles.get("bnc_out")
+        if tile is not None:
+            tile["last_pulse_ts"] = time.time()
+            dpg.configure_item(tile["dot"], color=_COLOR_GREEN)
+
+        if self._log:
+            self._log.add(LogEntry(
+                timestamp=time.time(), direction="TX", node_id=0, frame_type="BNC",
+                event_name="BNC OUT pulse", raw_id=0, raw_data=b"",
+                details=f"trigger={cfg.trigger} width={cfg.pulse_width_us}us matched={event_name}",
+            ))
+
+    def _on_bnc_manual_pulse(self) -> None:
+        """'Manual Pulse' button — fires BNC OUT once for bench testing, regardless of Enabled."""
+        width = self._bnc_out_cfg.pulse_width_us
+        self._io.pulse_bnc_out(width)
+        tile = self._bnc_tiles.get("bnc_out")
+        if tile is not None:
+            tile["last_pulse_ts"] = time.time()
+            dpg.configure_item(tile["dot"], color=_COLOR_GREEN)
+        if self._log:
+            self._log.add(LogEntry(
+                timestamp=time.time(), direction="TX", node_id=0, frame_type="BNC",
+                event_name="BNC OUT manual pulse", raw_id=0, raw_data=b"",
+                details=f"width={width}us",
+            ))
+
+    def _refresh_bnc_dots(self) -> None:
+        """Decay the BNC IN/OUT indicator dots back to grey shortly after the last edge/pulse."""
+        now = time.time()
+        for key in ("bnc_in1", "bnc_in2", "bnc_out"):
+            tile = self._bnc_tiles.get(key)
+            if tile is None:
+                continue
+            last = tile.get("last_edge_ts", tile.get("last_pulse_ts", 0.0))
+            if (now - last) > 0.3:
+                dpg.configure_item(tile["dot"], color=_COLOR_GREY)
+
+    # ------------------------------------------------------------------
     # Label change
     # ------------------------------------------------------------------
 
@@ -788,6 +1029,7 @@ class VFMApp:
             self._log.close()
         if self._discovery:
             self._discovery.stop()
+        self._io.shutdown()
 
 
 # ---------------------------------------------------------------------------

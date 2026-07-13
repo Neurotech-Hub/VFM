@@ -1,0 +1,21 @@
+# -----------------------------------------------------------------------------
+# VFM Base Station — CAN HAT device tree overlay
+#
+# Append the lines below to /boot/firmware/config.txt on the Raspberry Pi 5
+# (Raspberry Pi OS Bookworm or later), then reboot.
+#
+#   sudo tee -a /boot/firmware/config.txt < boot-config-can.append.txt
+#   sudo reboot
+#
+# oscillator=12000000  -> the HAT's MCP2515 crystal is 12 MHz (Y1 on the
+#                         base station schematic). If your board is ever
+#                         re-spun with a different crystal, update this value
+#                         to match — a mismatched oscillator produces a wrong
+#                         bit-timing and the bus will not communicate.
+# interrupt=5           -> MCP2515 INT pin wired to BCM GPIO5.
+# spimaxfrequency=10000000 -> 10 MHz SPI clock (MCP2515 max is ~10 MHz at 5V,
+#                         conservative for reliability with cable/HAT stray
+#                         capacitance).
+# -----------------------------------------------------------------------------
+dtparam=spi=on
+dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=5,spimaxfrequency=10000000

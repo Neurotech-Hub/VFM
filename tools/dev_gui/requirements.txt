@@ -1,3 +1,4 @@
 dearpygui>=1.11
 python-can>=4.4
 RPi.GPIO>=0.7
+gpiod>=2.1

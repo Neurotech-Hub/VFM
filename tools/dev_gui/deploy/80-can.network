@@ -1,0 +1,17 @@
+# -----------------------------------------------------------------------------
+# VFM Base Station — persistent can0 bring-up via systemd-networkd
+#
+# Install:
+#   sudo cp 80-can.network /etc/systemd/network/80-can.network
+#   sudo systemctl enable --now systemd-networkd
+#   sudo systemctl restart systemd-networkd
+#
+# Verify:
+#   ip -details link show can0     # should show "state UP" and bitrate 250000
+# -----------------------------------------------------------------------------
+[Match]
+Name=can0
+
+[CAN]
+BitRate=250000
+RestartSec=100ms

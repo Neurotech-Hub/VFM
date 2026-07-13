@@ -16,8 +16,10 @@ For returning nodes (NVS has saved ID):
   Node sends REJOIN(MAC, savedId) on 0x083 → base registers immediately.
 
 GPIO note:
-  The AEO pin number is fixed by hardware design (defined in AEO_BCM_PIN below).
-  On vcan0 (no GPIO), GPIO calls are skipped automatically.
+  AEO (GPIO27) is driven through the shared IOManager (see io_manager.py),
+  DiscoveryManager just calls io_manager.drive_aeo(). 
+  On vcan0 / dev machines with no GPIO hardware,
+  IOManager degrades to a no-op automatically.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from .protocol import (
     CAN_ID_ANNOUNCE,
@@ -36,8 +38,8 @@ from .protocol import (
     parse_discovery,
 )
 
-# BCM GPIO pin for the AEO output — fixed by VFM hardware design.
-AEO_BCM_PIN: int = 17
+if TYPE_CHECKING:
+    from .io_manager import IOManager
 
 # How long to wait for new ANNOUNCE/REJOIN before declaring discovery complete.
 DISCOVERY_IDLE_TIMEOUT_S: float = 5.0
@@ -63,15 +65,16 @@ class DiscoveryManager:
 
     Usage::
 
-        dm = DiscoveryManager(can_manager)
+        dm = DiscoveryManager(can_manager, io_manager)
         dm.on_node_discovered(lambda node: registry.register_node(node.node_id, node.mac))
         dm.start()
         # In render loop:
         dm.handle_frame(msg)  # for each incoming CAN message
     """
 
-    def __init__(self, can_manager) -> None:
+    def __init__(self, can_manager, io_manager: "IOManager") -> None:
         self._can = can_manager
+        self._io = io_manager
         self._phase = DiscoveryPhase.Idle
         self._next_id: int = 1
         self._last_activity: float = 0.0
@@ -79,8 +82,6 @@ class DiscoveryManager:
         self._discovered: List[DiscoveredNode] = []
         self._node_callback: Optional[Callable[[DiscoveredNode], None]] = None
         self._complete_callback: Optional[Callable[[], None]] = None
-        self._gpio_available = False
-        self._gpio_setup()
 
     # ------------------------------------------------------------------
     # Callbacks
@@ -108,7 +109,7 @@ class DiscoveryManager:
         self._pending_assign = None
         self._last_activity = time.time()
         self._phase = DiscoveryPhase.Running
-        self._drive_aeo_high()
+        self._io.drive_aeo(True)
 
     def reset(self) -> None:
         """Reset and restart discovery from scratch."""
@@ -118,7 +119,6 @@ class DiscoveryManager:
     def stop(self) -> None:
         """Abort discovery (does not drive AEO LOW — nodes keep their IDs)."""
         self._phase = DiscoveryPhase.Complete
-        self._gpio_cleanup()
 
     # ------------------------------------------------------------------
     # Frame handler — call this from the render loop for every incoming frame
@@ -213,35 +213,3 @@ class DiscoveryManager:
         self._discovered.append(node)
         if self._node_callback:
             self._node_callback(node)
-
-    # ------------------------------------------------------------------
-    # GPIO helpers
-    # ------------------------------------------------------------------
-
-    def _gpio_setup(self) -> None:
-        try:
-            import RPi.GPIO as GPIO  # type: ignore
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(AEO_BCM_PIN, GPIO.OUT, initial=GPIO.LOW)
-            self._gpio_available = True
-        except Exception:
-            # Not on a Pi, or RPi.GPIO not installed — GPIO calls silently skipped
-            self._gpio_available = False
-
-    def _drive_aeo_high(self) -> None:
-        if not self._gpio_available:
-            return
-        try:
-            import RPi.GPIO as GPIO  # type: ignore
-            GPIO.output(AEO_BCM_PIN, GPIO.HIGH)
-        except Exception:
-            pass
-
-    def _gpio_cleanup(self) -> None:
-        if not self._gpio_available:
-            return
-        try:
-            import RPi.GPIO as GPIO  # type: ignore
-            GPIO.cleanup(AEO_BCM_PIN)
-        except Exception:
-            pass

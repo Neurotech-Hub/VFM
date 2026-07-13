@@ -15,7 +15,7 @@ bool VFM::begin() {
 
     // 1. LEDs first – visual feedback during boot
     leds_.begin();
-    leds_.setBlinkIntervalMs(500); // fast blink = booting
+    leds_.setIoBlinkIntervalMs(500); // IO LED fast blink = booting
 
     // 2. NodeIdentity: configure pins, read MAC, restore NVS id
     if (identity_.begin() != ServiceStatus::Ok) {
@@ -68,7 +68,8 @@ bool VFM::begin() {
     identity_.startDiscovery();
 
     if (ok) {
-        leds_.setBlinkIntervalMs(1000); // slow blink = waiting for discovery
+        leds_.setIoBlinkIntervalMs(1000);  // IO LED slow blink = waiting for discovery
+        leds_.setBlinkIntervalMs(1000);    // status LED slow blink = waiting for discovery
     }
     return ok;
 }
@@ -83,10 +84,18 @@ void VFM::update() {
     handleDispenserEvents();
     sendHeartbeatIfDue();
 
-    // Once discovery completes, change LED pattern to steady on
+    // Once discovery completes, turn both LEDs off
     if (identity_.isEnabled()) {
-        leds_.setBlinkIntervalMs(0);
-        leds_.setStatus(true);
+        leds_.setBlinkIntervalMs(0);       // stop status LED blinking
+        leds_.setStatus(false);            // status LED OFF
+        leds_.setIoBlinkIntervalMs(0);     // stop IO LED blinking
+        leds_.setIoLed(false);             // IO LED OFF
+    }
+
+    // Status LED solid ON while in Fault state
+    if (dispenser_.state() == DispenseState::Fault) {
+        leds_.setBlinkIntervalMs(0);       // ensure not blinking
+        leds_.setStatus(true);             // solid ON = fault
     }
 }
 
@@ -103,8 +112,18 @@ void VFM::handleDispenserEvents() {
         case DispenseEvent::PelletLoaded:    canEv = CanEvent::PelletLoaded;    break;
         case DispenseEvent::PelletPresented: canEv = CanEvent::PelletPresented; break;
         case DispenseEvent::PelletTaken:     canEv = CanEvent::PelletTaken;     break;
-        case DispenseEvent::Fault:           canEv = CanEvent::Fault;           break;
+        case DispenseEvent::Fault:
+            canEv = CanEvent::Fault;
+            leds_.setBlinkIntervalMs(0);    // stop any blink pattern
+            leds_.setStatus(true);          // status LED solid ON = fault
+            break;
         default: return;
+    }
+
+    // Clear status LED when returning to normal operation after a fault
+    if (ev == DispenseEvent::PelletLoaded || ev == DispenseEvent::PelletPresented ||
+        ev == DispenseEvent::PelletTaken) {
+        leds_.setStatus(false);             // status LED OFF = no fault
     }
 
     // Attach pellet count as one extra byte in the event payload

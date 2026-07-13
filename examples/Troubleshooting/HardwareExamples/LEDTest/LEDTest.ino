@@ -30,7 +30,7 @@ uint32_t lastStepMs = 0;
 
 void allOff() {
     leds.setStatus(false);
-    leds.setLed9(false);
+    leds.setIoLed(false);
     leds.setLed10(false);
 }
 
@@ -42,7 +42,7 @@ void showStep(uint8_t step) {
             Serial.println(F("[LED] Status (GPIO39)"));
             break;
         case 1:
-            leds.setLed9(true);
+            leds.setIoLed(true);
             Serial.println(F("[LED] IO9 (GPIO9)"));
             break;
         case 2:
@@ -84,7 +84,7 @@ void loop() {
         case 'a':
             mode = Mode::Manual;
             leds.setStatus(true);
-            leds.setLed9(true);
+            leds.setIoLed(true);
             leds.setLed10(true);
             Serial.println(F("[LED] All ON"));
             break;
@@ -102,7 +102,7 @@ void loop() {
         case '2':
             mode = Mode::Manual;
             allOff();
-            leds.setLed9(true);
+            leds.setIoLed(true);
             Serial.println(F("[LED] IO9 only"));
             break;
         case '3':

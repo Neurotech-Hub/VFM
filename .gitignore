@@ -1,2 +1,6 @@
 .cursor/
 .vscode/
+venv/
+.envrc
+__pycache__/
+build/

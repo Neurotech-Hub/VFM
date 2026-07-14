@@ -81,13 +81,25 @@ except ImportError:
     class ServiceStatus(IntEnum):
         Ok=0; NotInitialized=1; Timeout=2; Jam=3; InvalidData=4
 
+    from dataclasses import dataclass as _dataclass
+
+    @_dataclass
+    class HeartbeatPayload:
+        dispense_state: "DispenseState"
+        presence: bool
+        pg1: bool
+        pg2: bool
+        pg3: bool
+        fault_code: "ServiceStatus"
+
     CAN_CMD_BASE=0x100; CAN_CMD_BROADCAST=0x100; CAN_ID_ANNOUNCE=0x080
     CAN_ID_ASSIGN=0x081; CAN_ID_ACK=0x082; CAN_ID_REJOIN=0x083
     CAN_STATUS_BASE=0x200; CAN_EVENT_BASE=0x300
 
     def build_heartbeat_frame(node_id, hb):
         arb_id = CAN_STATUS_BASE + node_id
-        data = bytes([int(hb["dispense_state"]),0,0,int(hb["presence"]),hb["pg_bits"],0,0,0])
+        pg_bits = (int(hb.pg1) << 0) | (int(hb.pg2) << 1) | (int(hb.pg3) << 2)
+        data = bytes([int(hb.dispense_state), 0, 0, int(hb.presence), pg_bits, int(hb.fault_code), 0, 0])
         return arb_id, data
 
     def build_event_frame(node_id, event, extra=b""):
@@ -136,14 +148,15 @@ class SimNode:
         """Generate a deterministic fake MAC from the index."""
         return bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, self.index + 1])
 
-    def hb_dict(self) -> dict:
-        pg = (int(self.pg1) << 0) | (int(self.pg2) << 1) | (int(self.pg3) << 2)
-        return {
-            "dispense_state": self.dispense_state,
-            "presence": self.presence,
-            "pg_bits": pg,
-            "fault_code": self.fault_code,
-        }
+    def hb_payload(self) -> HeartbeatPayload:
+        return HeartbeatPayload(
+            dispense_state=self.dispense_state,
+            presence=self.presence,
+            pg1=self.pg1,
+            pg2=self.pg2,
+            pg3=self.pg3,
+            fault_code=self.fault_code,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +296,9 @@ class NodeSimulator:
                 continue
 
             if cmd == CanCmd.Ping:
-                self._send_event(node, CanEvent.Pong)
+                # Pong carries the node's MAC — mirrors real firmware so the
+                # GUI can confirm/refresh its MAC<->ID mapping from a live node.
+                self._send_event(node, CanEvent.Pong, node.mac)
                 print(f"  [SIM] Node {node.node_id}: status LED blink (Ping)", flush=True)
 
             elif cmd == CanCmd.Dispense:
@@ -392,12 +407,12 @@ class NodeSimulator:
         print(f"  [SIM] Node {node.index+1}: REJOIN id={node.node_id}", flush=True)
 
     def _send_heartbeat(self, node: SimNode) -> None:
-        arb_id, data = build_heartbeat_frame(node.node_id, node.hb_dict())
+        arb_id, data = build_heartbeat_frame(node.node_id, node.hb_payload())
         msg = can.Message(arbitration_id=arb_id, data=data, is_extended_id=False)
         self._bus.send(msg)
 
-    def _send_event(self, node: SimNode, event: CanEvent) -> None:
-        arb_id, data = build_event_frame(node.node_id, event)
+    def _send_event(self, node: SimNode, event: CanEvent, extra: bytes = b"") -> None:
+        arb_id, data = build_event_frame(node.node_id, event, extra)
         msg = can.Message(arbitration_id=arb_id, data=data, is_extended_id=False)
         self._bus.send(msg)
         print(f"  [SIM] Node {node.node_id}: → {event.name}", flush=True)

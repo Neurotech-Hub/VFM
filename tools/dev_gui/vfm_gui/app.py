@@ -54,13 +54,14 @@ from .protocol import (
 # ---------------------------------------------------------------------------
 
 WINDOW_W = 1280
-WINDOW_H = 920        # 1.15x taller viewport (was 800)
+WINDOW_H = 960        
 TILE_W   = 280
-TILE_H   = 320        # ~1.1x taller node tiles on the control & monitoring screen (was 290)
+TILE_H   = 300        
 LOG_ROWS = 18        # visible rows in the log table before scroll
-LOG_TABLE_HEIGHT = 240  # ~1.1x taller log table (was 220)
+LOG_TABLE_HEIGHT = 220  
 STALE_CHECK_INTERVAL = 1.0  # seconds between staleness sweeps
 DEFAULT_HEARTBEAT_INTERVAL_S = 5.0  # default node heartbeat interval
+MAC_PING_RETRY_S = 3.0  # min seconds between MAC-resolution Pings to the same node
 
 # Status dot color tags (registered once at startup)
 _COLOR_GREEN  = (60,  200, 80,  255)
@@ -134,6 +135,9 @@ class VFMApp:
         self._log_filter_type = "All"
         self._show_heartbeats = False
         self._hb_interval_s = DEFAULT_HEARTBEAT_INTERVAL_S
+
+        # Throttle for MAC-resolution Pings (node_id -> last-sent time.time()).
+        self._mac_ping_sent: Dict[int, float] = {}
 
         # Base-station-side dispense scheduler (per node_id)
         self._schedules: Dict[int, ScheduleConfig] = {}
@@ -770,6 +774,7 @@ class VFMApp:
             if node_id and self._registry:
                 hb = parse_heartbeat(data)
                 if hb:
+                    self._maybe_request_mac_via_ping(node_id)
                     self._registry.update_from_heartbeat(node_id, hb)
                     self._refresh_tile(node_id)
                     details = (f"state={hb.dispense_state.name} "
@@ -782,6 +787,12 @@ class VFMApp:
             if node_id and self._registry:
                 ev = parse_event(data)
                 if ev:
+                    if ev.event == CanEvent.Pong and len(ev.raw_extra) >= 6:
+                        mac = bytes(ev.raw_extra[:6])
+                        details = f"MAC={format_mac(mac)}"
+                        self._handle_pong_mac(node_id, mac)
+                    else:
+                        self._maybe_request_mac_via_ping(node_id)
                     self._registry.update_from_event(node_id, ev.event)
                     self._refresh_tile(node_id)
                     entry_name = ev.event.name
@@ -837,6 +848,56 @@ class VFMApp:
                 raw_data=data,
                 details=details,
             ))
+
+    # ------------------------------------------------------------------
+    # MAC resolution (Ping / Pong round-trip)
+    # ------------------------------------------------------------------
+
+    def _maybe_request_mac_via_ping(self, node_id: int) -> None:
+        """
+        If a node's MAC is still unknown in this session, send it a Ping.
+
+        A node only sends ANNOUNCE/REJOIN (which carry its MAC) once at
+        boot. If the base-station GUI is restarted while nodes are already
+        running, those discovery frames are never seen again — only
+        heartbeats/events arrive, which carry no MAC on their own. Rather
+        than trusting stale data from the persistent MAC↔ID registry file,
+        the firmware echoes the node's live MAC in its Pong reply to Ping
+        (see _handle_pong_mac), so the tile only ever shows a MAC that was
+        just confirmed by the actual node. Retries are throttled so this
+        doesn't flood the bus while waiting for a reply.
+        """
+        if not self._registry or not self._can:
+            return
+        node = self._registry.get(node_id)
+        if node is None or node.mac is not None:
+            return
+        now = time.time()
+        if now - self._mac_ping_sent.get(node_id, 0.0) < MAC_PING_RETRY_S:
+            return
+        self._mac_ping_sent[node_id] = now
+        self._send_cmd(node_id, CanCmd.Ping)
+
+    def _handle_pong_mac(self, node_id: int, mac: bytes) -> None:
+        """
+        A Pong arrived carrying the node's live MAC (in reply to any Ping,
+        not just a MAC-resolution one). Register it if new/changed, and
+        refresh the persistent MAC↔ID registry so future discovery/REJOIN
+        alignment stays accurate too. The RX log entry for this frame
+        (added by the caller) already records the confirmed MAC.
+        """
+        if not self._registry:
+            return
+        node = self._registry.get(node_id)
+        if node is None:
+            return
+        self._mac_ping_sent.pop(node_id, None)
+        if node.mac == mac:
+            return
+        self._registry.register_node(node_id, mac, source="PING")
+        if self._mac_registry is not None:
+            self._mac_registry.set(mac, node_id)
+        self._refresh_tile(node_id)
 
     # ------------------------------------------------------------------
     # Tile refresh
@@ -985,6 +1046,7 @@ class VFMApp:
             self._refresh_all_tiles()
         if self._discovery:
             self._discovery.reset()
+            time.sleep(0.25)
 
     def _on_node_discovered(self, node) -> None:
         if self._registry:

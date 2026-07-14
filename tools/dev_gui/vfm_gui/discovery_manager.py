@@ -145,9 +145,19 @@ class DiscoveryManager:
         time.sleep(0.05)
         self._io.drive_aeo(True)
 
+        # Give nodes a brief window to process ClearId / NVS reset and then
+        # pulse again. This helps with firmware that needs a second AEO edge
+        # after a full clear to re-enter ANNOUNCE from WaitAEI.
+        if clear_first:
+            time.sleep(0.2)
+            self._io.drive_aeo(False)
+            time.sleep(0.05)
+            self._io.drive_aeo(True)
+
     def reset(self) -> None:
         """Reset and restart discovery from scratch (clears node NVS IDs)."""
         self._phase = DiscoveryPhase.Idle
+        self._last_activity = time.time()
         self.start(clear_first=True)
 
     def rediscover(self) -> None:

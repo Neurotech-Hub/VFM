@@ -97,15 +97,9 @@ bool VFM::begin() {
                 break;
 
             case CanCmd::Ping: {
-
-                CanEvent pong = CanEvent::Pong;
-
-                can_.sendEvent(pong);
-
+                can_.sendEvent(CanEvent::Pong, identity_.mac(), 6);
                 blinkStatusLedForPing();
-
                 break;
-
             }
 
             case CanCmd::ReqStatus:

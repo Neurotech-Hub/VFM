@@ -35,7 +35,7 @@ class CanEvent(IntEnum):
     PelletPresented = 0x02
     PelletTaken     = 0x03
     Fault           = 0x04
-    Pong            = 0x05
+    Pong            = 0x05 
 
 
 class DispenseState(IntEnum):

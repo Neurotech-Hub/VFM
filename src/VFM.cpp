@@ -418,15 +418,17 @@ void VFM::handleInputEvents() {
         sendInputChanged(InputId::PG2, pg2);
     }
     if (pg3 != reportedPg3_) {
-        // Absorb PG3 edges during the post-trigger blank so the event log
-        // is not spammed by bounce / repeated open-close (3 s window).
+        // Blank starts after a completed high→low cycle. During the blank,
+        // absorb edges so bounce / chatter does not spam the event log.
         if (dispenser_.pg3EventBlanked()) {
             reportedPg3_ = pg3;
         } else {
+            const bool wasOpen = reportedPg3_;
             reportedPg3_ = pg3;
             sendInputChanged(InputId::PG3, pg3);
-            // First rising edge of a burst starts the blank; that edge is logged.
-            if (pg3) {
+            // Falling edge ends the trigger cycle → start 3 s blindness.
+            // Rising is always logged when not blanked (including after blank).
+            if (wasOpen && !pg3) {
                 dispenser_.blankPg3Events();
             }
         }

@@ -55,13 +55,15 @@ public:
     bool pg2() const { return pg2State_; } // actuator at home / down
     bool pg3() const { return pg3State_; } // dome open
 
-    // True while PG3 rising/falling edges should be ignored for event logging
+    // True while PG3 edges should be ignored for event logging
     // (AccessAttempt + CanEvent::InputChanged). Sensing for heartbeat still updates.
+    // Blank starts after a completed high→low cycle (falling edge), not on rising.
     bool pg3EventBlanked() const {
         return pg3BlankUntilMs_ != 0 && (int32_t)(millis() - pg3BlankUntilMs_) < 0;
     }
 
     // Start / refresh the PG3 event-log blank window (default 3 s).
+    // Call after reporting a falling edge (end of trigger cycle).
     void blankPg3Events() {
         pg3BlankUntilMs_ = millis() + kPg3EventBlankMs;
     }

@@ -17,7 +17,7 @@ These are the ones called out most often during bring-up.
 | **30 s**      | `kDomeOpenWarnMs`    | `DispenserService.h` | PG3 open continuously → `DomeOpenWarning` (non-sticky)        |
 | **5 s**       | `kPg2ClearOnRaiseMs` | `DispenserService.h` | After raise starts, PG2 must clear within this or Fault/`Jam` |
 | **1 s**       | `kPg1JamMs`          | `DispenserService.h` | PG1 held (drop detector not a brief pulse) → Jam              |
-| **3 s**       | `kPg3EventBlankMs`   | `DispenserService.h` | After a PG3 edge, suppress further PG3 event-log edges        |
+| **3 s**       | `kPg3EventBlankMs`   | `DispenserService.h` | After PG3 high→low cycle, suppress further PG3 event-log edges |
 | **700 steps** | `kDefaultRaiseSteps` | `DispenserService.h` | M2 raise travel from PG2 home; bench default for 28BYJ-48     |
 
 
@@ -58,7 +58,7 @@ Same header; **not** runtime-configurable via CAN today.
 | 1 s   | `kPg1JamMs`          | PG1 stuck HIGH → Jam                             |
 | 5 s   | `kPg2ClearOnRaiseMs` | PG2 still blocked after raise start → Jam        |
 | 30 s  | `kDomeOpenWarnMs`    | PG3 held open → DomeOpenWarning                  |
-| 3 s   | `kPg3EventBlankMs`   | Blank PG3 `AccessAttempt` / `InputChanged` edges |
+| 3 s   | `kPg3EventBlankMs`   | After PG3 high→low, blank next `AccessAttempt` / `InputChanged` |
 
 
 ---

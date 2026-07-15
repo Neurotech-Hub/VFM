@@ -31,12 +31,26 @@ class CanCmd(IntEnum):
 
 class CanEvent(IntEnum):
     """Events sent from a node to the base station (CAN ID 0x300 + nodeId)."""
-    PelletLoaded    = 0x01
+    PelletLoaded    = 0x01  # "Loaded" — PG1 detected
     PelletPresented = 0x02
     AccessAttempt   = 0x03
-    Fault           = 0x04
+    Fault           = 0x04  # raw_extra[0] = ServiceStatus (Timeout/Jam)
     Pong            = 0x05
     InputChanged    = 0x06
+    Lowering        = 0x07  # M2 toward PG2 (incl. SeekingAway)
+    Loading         = 0x08  # M1 feeding
+    Raising         = 0x09  # M2 raising pallet
+    DomeOpenWarning = 0x0A  # PG3 open >30 s (non-sticky warning)
+
+
+# Friendly event-log labels for dispense phases (CanEvent.name may differ).
+CAN_EVENT_DISPLAY_NAME = {
+    CanEvent.PelletLoaded: "Loaded",
+    CanEvent.Lowering: "Lowering",
+    CanEvent.Loading: "Loading",
+    CanEvent.Raising: "Raising",
+    CanEvent.DomeOpenWarning: "DomeOpenWarning",
+}
 
 
 class InputId(IntEnum):
@@ -48,14 +62,19 @@ class InputId(IntEnum):
 
 
 class DispenseState(IntEnum):
-    """Dispenser FSM states carried in heartbeat byte 0."""
-    Idle        = 0
-    Lowering    = 1  # M2 down until PG2
-    Feeding     = 2  # M1 feeding pellet
-    Raising     = 3  # M2 up by step count
-    Presented   = 4  # Pellet at top; waits for Abort / next Dispense
-    SeekingAway = 5  # M2 up until PG2 clears (was Taken)
-    Fault       = 6  # Timeout / jam
+    """Dispenser FSM states carried in heartbeat byte 0.
+
+    Loading mirrors firmware Feeding (value 2). AccessAttempt is GUI-only
+    (not in heartbeats); set from CanEvent.AccessAttempt until the next HB.
+    """
+    Idle          = 0
+    Lowering      = 1  # M2 down until PG2
+    Loading       = 2  # M1 feeding pellet (firmware: Feeding)
+    Raising       = 3  # M2 up by step count
+    Presented     = 4  # Pellet at top; waits for Abort / next Dispense
+    SeekingAway   = 5  # M2 up until PG2 clears (was Taken)
+    Fault         = 6  # Timeout / jam
+    AccessAttempt = 7  # GUI overlay after PG3 access event (HB still Presented)
 
 
 class ServiceStatus(IntEnum):
@@ -174,6 +193,16 @@ def parse_event(data: bytes) -> Optional[EventPayload]:
     except ValueError:
         return None
     return EventPayload(event=event, raw_extra=data[1:])
+
+
+def parse_fault_code(event: EventPayload) -> Optional[ServiceStatus]:
+    """Decode Fault event extra byte[0] as ServiceStatus (Timeout/Jam)."""
+    if event.event != CanEvent.Fault or len(event.raw_extra) < 1:
+        return None
+    try:
+        return ServiceStatus(event.raw_extra[0])
+    except ValueError:
+        return None
 
 
 def parse_input_changed(event: EventPayload) -> Optional[InputChangedPayload]:

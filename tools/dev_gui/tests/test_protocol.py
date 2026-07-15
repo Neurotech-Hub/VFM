@@ -18,6 +18,7 @@ from vfm_gui.protocol import (
     CAN_ID_ASSIGN,
     CAN_ID_ACK,
     CAN_ID_REJOIN,
+    CAN_EVENT_DISPLAY_NAME,
     build_cmd_frame,
     build_assign_frame,
     build_heartbeat_frame,
@@ -25,6 +26,7 @@ from vfm_gui.protocol import (
     parse_heartbeat,
     parse_event,
     parse_input_changed,
+    parse_fault_code,
     parse_discovery,
     classify_frame,
     format_mac,
@@ -153,6 +155,47 @@ class TestParseEvent:
     def test_input_changed_rejects_short_payload(self):
         ev = parse_event(bytes([CanEvent.InputChanged, InputId.PG2]))
         assert parse_input_changed(ev) is None
+
+    def test_phase_events(self):
+        for ev_type, code in (
+            (CanEvent.Lowering, 0x07),
+            (CanEvent.Loading, 0x08),
+            (CanEvent.Raising, 0x09),
+        ):
+            assert ev_type == code
+            ev = parse_event(bytes([ev_type]))
+            assert ev is not None
+            assert ev.event == ev_type
+
+    def test_phase_display_names(self):
+        assert CAN_EVENT_DISPLAY_NAME[CanEvent.PelletLoaded] == "Loaded"
+        assert CAN_EVENT_DISPLAY_NAME[CanEvent.Lowering] == "Lowering"
+        assert CAN_EVENT_DISPLAY_NAME[CanEvent.Loading] == "Loading"
+        assert CAN_EVENT_DISPLAY_NAME[CanEvent.Raising] == "Raising"
+
+    def test_dome_open_warning_event(self):
+        assert CanEvent.DomeOpenWarning == 0x0A
+        ev = parse_event(bytes([CanEvent.DomeOpenWarning]))
+        assert ev is not None
+        assert ev.event == CanEvent.DomeOpenWarning
+        assert CAN_EVENT_DISPLAY_NAME[CanEvent.DomeOpenWarning] == "DomeOpenWarning"
+
+    def test_fault_payload_timeout(self):
+        ev = parse_event(bytes([CanEvent.Fault, ServiceStatus.Timeout]))
+        assert ev is not None
+        assert parse_fault_code(ev) == ServiceStatus.Timeout
+
+    def test_fault_payload_jam(self):
+        ev = parse_event(bytes([CanEvent.Fault, ServiceStatus.Jam]))
+        assert parse_fault_code(ev) == ServiceStatus.Jam
+
+    def test_fault_payload_missing_extra(self):
+        ev = parse_event(bytes([CanEvent.Fault]))
+        assert parse_fault_code(ev) is None
+
+    def test_fault_payload_ignores_non_fault(self):
+        ev = parse_event(bytes([CanEvent.PelletPresented, ServiceStatus.Jam]))
+        assert parse_fault_code(ev) is None
 
 
 class TestParseDiscovery:

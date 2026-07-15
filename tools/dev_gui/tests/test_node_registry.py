@@ -86,11 +86,58 @@ class TestNodeRegistry:
         reg.update_from_event(1, CanEvent.PelletPresented)
         assert reg.get(1).dispense_state == DispenseState.Presented
 
+    def test_phase_events_update_dispense_state(self):
+        reg = NodeRegistry(1)
+        reg.update_from_heartbeat(1, make_hb())
+        seq = [
+            (CanEvent.Lowering, DispenseState.Lowering, "LOWERING"),
+            (CanEvent.Loading, DispenseState.Loading, "LOADING"),
+            (CanEvent.PelletLoaded, DispenseState.Raising, "RAISING"),
+            (CanEvent.Raising, DispenseState.Raising, "RAISING"),
+            (CanEvent.AccessAttempt, DispenseState.AccessAttempt, "ACCESSATTEMPT"),
+        ]
+        for event, state, label in seq:
+            reg.update_from_event(1, event)
+            node = reg.get(1)
+            assert node.dispense_state == state
+            assert node.status_label == label
+
     def test_fault_event(self):
         reg = NodeRegistry(1)
         reg.update_from_heartbeat(1, make_hb())
-        reg.update_from_event(1, CanEvent.Fault)
-        assert reg.get(1).dispense_state == DispenseState.Fault
+        reg.update_from_event(1, CanEvent.Fault, fault_code=ServiceStatus.Timeout)
+        node = reg.get(1)
+        assert node.dispense_state == DispenseState.Fault
+        assert node.fault_code == ServiceStatus.Timeout
+
+    def test_fault_event_jam(self):
+        reg = NodeRegistry(1)
+        reg.update_from_heartbeat(1, make_hb())
+        reg.update_from_event(1, CanEvent.Fault, fault_code=ServiceStatus.Jam)
+        assert reg.get(1).fault_code == ServiceStatus.Jam
+
+    def test_dome_open_warning_and_clear_on_pg3(self):
+        reg = NodeRegistry(1)
+        reg.update_from_heartbeat(1, make_hb())
+        reg.update_from_event(1, CanEvent.DomeOpenWarning)
+        node = reg.get(1)
+        assert node.dome_open_warning is True
+        assert node.dispense_state != DispenseState.Fault
+
+        reg.update_from_input(1, InputId.PG3, True)
+        assert node.dome_open_warning is True
+        reg.update_from_input(1, InputId.PG3, False)
+        assert node.dome_open_warning is False
+
+    def test_clear_fault_resets_warning(self):
+        reg = NodeRegistry(1)
+        reg.update_from_event(1, CanEvent.Fault, fault_code=ServiceStatus.Jam)
+        reg.update_from_event(1, CanEvent.DomeOpenWarning)
+        reg.clear_fault(1)
+        node = reg.get(1)
+        assert node.fault_code == ServiceStatus.Ok
+        assert node.dispense_state == DispenseState.Idle
+        assert node.dome_open_warning is False
 
     def test_input_event_updates_without_heartbeat(self):
         reg = NodeRegistry(1)

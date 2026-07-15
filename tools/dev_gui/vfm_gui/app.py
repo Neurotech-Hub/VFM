@@ -39,10 +39,12 @@ from .protocol import (
     node_id_from_event_id,
     node_id_from_hb_id,
     parse_event,
+    parse_fault_code,
     parse_input_changed,
     parse_heartbeat,
     parse_discovery,
     build_setconfig_heartbeat,
+    CAN_EVENT_DISPLAY_NAME,
     CAN_ID_ANNOUNCE,
     CAN_ID_ASSIGN,
     CAN_ID_ACK,
@@ -57,7 +59,7 @@ from .protocol import (
 WINDOW_W = 1280
 WINDOW_H = 960        
 TILE_W   = 280
-TILE_H   = 300        
+TILE_H   = 318
 LOG_ROWS = 18        # visible rows in the log table before scroll
 LOG_TABLE_HEIGHT = 220  
 STALE_CHECK_INTERVAL = 1.0  # seconds between staleness sweeps
@@ -98,6 +100,45 @@ class ScheduleConfig:
         if self.mode == "chained":
             return f"{self.chained_delay_minutes:g} min after Node {self.chained_node_id}"
         return "Off"
+
+    @property
+    def due_time(self) -> Optional[float]:
+        """Absolute deadline for the next dispense, if one is pending."""
+        if self.mode == "interval":
+            return self.next_fire_time
+        if self.mode == "chained":
+            return self.armed_fire_time
+        return None
+
+    def countdown_str(self, now: Optional[float] = None) -> str:
+        """
+        Human-readable remaining time until the next dispense.
+
+        Returns "" when Off, "waiting" when chained but not yet armed,
+        otherwise "Xm YYs" (or "Xh Xm YYs" for longer intervals).
+        """
+        if self.mode == "off":
+            return ""
+        due = self.due_time
+        if due is None:
+            return "waiting" if self.mode == "chained" else ""
+        remaining = max(0.0, due - (now if now is not None else time.time()))
+        # Ceil so the display only hits 0m 00s when the schedule is truly due.
+        total_s = int(remaining + 0.999) if remaining > 0 else 0
+        hours, rem = divmod(total_s, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours:
+            return f"{hours}h {minutes}m {seconds:02d}s"
+        return f"{minutes}m {seconds:02d}s"
+
+    def display_line(self, now: Optional[float] = None) -> str:
+        """Full schedule label for the node tile, including live countdown."""
+        if self.mode == "off":
+            return "Schedule: Off"
+        countdown = self.countdown_str(now)
+        if not countdown:
+            return f"Schedule: {self.summary}"
+        return f"Schedule: {self.summary} · {countdown}"
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +576,7 @@ class VFMApp:
             with dpg.group(horizontal=True):
                 dpg.add_text("Fault:", color=(160,165,175,255))
                 tags["fault_text"] = dpg.add_text("—")
+            tags["warn_text"] = dpg.add_text("", color=_COLOR_AMBER)
 
             dpg.add_separator()
 
@@ -810,10 +852,19 @@ class VFMApp:
                             entry_name = "Invalid Input Event"
                             details = "InputChanged payload must contain input ID and state"
                     else:
-                        self._registry.update_from_event(node_id, ev.event)
-                        entry_name = ev.event.name
-                        if ev.event in (
+                        fault_code = parse_fault_code(ev) if ev.event == CanEvent.Fault else None
+                        self._registry.update_from_event(node_id, ev.event, fault_code=fault_code)
+                        entry_name = CAN_EVENT_DISPLAY_NAME.get(ev.event, ev.event.name)
+                        if ev.event == CanEvent.Fault:
+                            code = fault_code.name if fault_code is not None else "unknown"
+                            details = f"fault={code}"
+                        elif ev.event == CanEvent.DomeOpenWarning:
+                            details = "PG3 open >30s"
+                        elif ev.event in (
+                            CanEvent.Lowering,
+                            CanEvent.Loading,
                             CanEvent.PelletLoaded,
+                            CanEvent.Raising,
                             CanEvent.PelletPresented,
                             CanEvent.AccessAttempt,
                         ) and len(ev.raw_extra) >= 2:
@@ -979,10 +1030,14 @@ class VFMApp:
             col = (100, 220, 120, 255) if val else (160, 165, 175, 255)
             dpg.configure_item(pg_tag, default_value=f"PG{label}: {sym}", color=col)
 
-        # Fault
+        # Fault (Timeout / Jam when sticky Fault)
         fault_str = node.fault_code.name
         fault_col = _COLOR_RED if node.fault_code.value != 0 else (160, 165, 175, 255)
         dpg.configure_item(tags["fault_text"], default_value=fault_str, color=fault_col)
+
+        # Dome open warning (amber, non-sticky)
+        warn = "Dome open >30s" if node.dome_open_warning else ""
+        dpg.configure_item(tags["warn_text"], default_value=warn, color=_COLOR_AMBER)
 
     def _refresh_all_tiles(self) -> None:
         if not self._registry:
@@ -1099,6 +1154,9 @@ class VFMApp:
         if not self._can:
             return
         ok = self._can.send_command(node_id, cmd, payload)
+        if cmd == CanCmd.Abort and self._registry:
+            self._registry.clear_fault(node_id)
+            self._refresh_tile(node_id)
         if self._log:
             self._log.add(LogEntry(
                 timestamp=time.time(),
@@ -1115,6 +1173,10 @@ class VFMApp:
         if not self._can:
             return
         self._can.send_broadcast(cmd, payload)
+        if cmd == CanCmd.Abort and self._registry:
+            for node in self._registry.all_nodes():
+                self._registry.clear_fault(node.node_id)
+            self._refresh_all_tiles()
         if self._log:
             self._log.add(LogEntry(
                 timestamp=time.time(),
@@ -1304,16 +1366,31 @@ class VFMApp:
 
         dpg.delete_item("schedule_modal")
 
-    def _refresh_schedule_text(self, node_id: int) -> None:
+    def _refresh_schedule_text(self, node_id: int, now: Optional[float] = None) -> None:
         tags = self._node_tiles.get(node_id)
         cfg = self._schedules.get(node_id)
         if tags is None or "schedule_text" not in tags:
             return
-        summary = cfg.summary if cfg else "Off"
+        if cfg is None or cfg.mode == "off":
+            dpg.configure_item(
+                tags["schedule_text"],
+                default_value="Schedule: Off",
+                color=(160, 165, 175, 255),
+            )
+            return
+
+        due = cfg.due_time
+        remaining = (due - (now if now is not None else time.time())) if due is not None else None
+        # Amber in the final half-minute so the ticking clock is hard to miss.
+        if remaining is not None and 0 <= remaining <= 30.0:
+            color = _COLOR_AMBER
+        else:
+            color = (100, 200, 100, 255)
+
         dpg.configure_item(
             tags["schedule_text"],
-            default_value=f"Schedule: {summary}",
-            color=(160, 165, 175, 255) if (cfg is None or cfg.mode == "off") else (100, 200, 100, 255),
+            default_value=cfg.display_line(now),
+            color=color,
         )
 
     def _arm_chained_schedules(self, source_node_id: int) -> None:
@@ -1326,9 +1403,14 @@ class VFMApp:
         for node_id, cfg in self._schedules.items():
             if cfg.mode == "chained" and cfg.chained_node_id == source_node_id:
                 cfg.armed_fire_time = now + cfg.chained_delay_minutes * 60.0
+                self._refresh_schedule_text(node_id, now)
 
     def _tick_schedulers(self, now: float) -> None:
-        """Fire Dispense commands for nodes whose schedule is due. Call once per frame."""
+        """
+        Fire Dispense commands for nodes whose schedule is due, and refresh
+        the live countdown label on every frame so the tile shows a ticking
+        "Xm YYs" clock until the next dispense.
+        """
         for node_id, cfg in self._schedules.items():
             if cfg.mode == "interval" and cfg.next_fire_time is not None:
                 if now >= cfg.next_fire_time:
@@ -1338,6 +1420,8 @@ class VFMApp:
                 if now >= cfg.armed_fire_time:
                     self._send_cmd(node_id, CanCmd.Dispense)
                     cfg.armed_fire_time = None
+            if cfg.mode != "off":
+                self._refresh_schedule_text(node_id, now)
 
     # ------------------------------------------------------------------
     # BNC / Sync I/O

@@ -160,8 +160,14 @@ void loop() {
         case vfm::DispenseEvent::AccessAttempt:
             Serial.println(F("[Event] AccessAttempt (still Presented)"));
             break;
+        case vfm::DispenseEvent::DomeOpenWarning:
+            Serial.println(F("[Event] DomeOpenWarning (>30s open)"));
+            break;
         case vfm::DispenseEvent::Fault:
-            Serial.println(F("[Event] FAULT – sticky until abort"));
+            Serial.print(F("[Event] FAULT – "));
+            Serial.println(
+                dispenser.faultCode() == vfm::ServiceStatus::Timeout ? F("Timeout") :
+                dispenser.faultCode() == vfm::ServiceStatus::Jam     ? F("Jam") : F("?"));
             break;
         default:
             break;

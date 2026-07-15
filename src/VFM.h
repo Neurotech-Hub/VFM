@@ -76,6 +76,10 @@ private:
     bool reportedPg3_      = false;
     bool reportedPresence_ = false;
 
+    // Last dispenser FSM state published as a phase event (Lowering / Loading /
+    // Raising). Heartbeats still carry the full state snapshot for recovery.
+    DispenseState lastReportedDispenseState_ = DispenseState::Idle;
+
     // Button (PIN_BTN, active LOW) long-press state
     uint32_t btnHoldMs_       = 1000; // required hold duration
     uint32_t btnPressStartMs_ = 0;    // millis() when button first went LOW
@@ -89,8 +93,10 @@ private:
     bool     pingBlinkActive_  = false;
 
     void handleDispenserEvents();
+    void handleDispensePhaseEvents();
     void handleInputEvents();
     void sendInputChanged(InputId input, bool active);
+    void sendPhaseEvent(CanEvent ev);
     void sendHeartbeatIfDue();
     void updateTouch();
     void updateButton();

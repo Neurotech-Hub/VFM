@@ -34,10 +34,11 @@ enum class DispenseState : uint8_t {
 // ---------------------------------------------------------------------------
 enum class DispenseEvent : uint8_t {
     None = 0,
-    PelletLoaded,    // PG1 fired: pellet seated in actuator cup
-    PelletPresented, // Actuator reached top (also increments pelletCount)
-    AccessAttempt,   // PG3 dome open (beam break) — not a confirmed take
-    Fault,           // Timeout or jam detected
+    PelletLoaded,     // PG1 fired: pellet seated in actuator cup
+    PelletPresented,  // Actuator reached top (also increments pelletCount)
+    AccessAttempt,    // PG3 dome open — not a confirmed take
+    Fault,            // Timeout or Jam (see DispenserService::faultCode())
+    DomeOpenWarning,  // PG3 open continuously >30 s (non-sticky warning)
 };
 
 // ---------------------------------------------------------------------------
@@ -59,12 +60,16 @@ enum class CanCmd : uint8_t {
 // Node -> Base on ID: 0x300 + nodeId
 // ---------------------------------------------------------------------------
 enum class CanEvent : uint8_t {
-    PelletLoaded    = 0x01,
+    PelletLoaded    = 0x01, // "Loaded" — PG1 detected; pellet in cup
     PelletPresented = 0x02,
     AccessAttempt   = 0x03, // was PelletTaken; dome open / access attempt only
-    Fault           = 0x04,
+    Fault           = 0x04, // payload byte[1] = ServiceStatus (Timeout/Jam)
     Pong            = 0x05,
     InputChanged    = 0x06, // payload: InputId(1), active(0/1)
+    Lowering        = 0x07, // M2 moving toward PG2 home (incl. SeekingAway)
+    Loading         = 0x08, // M1 running (Feeding state)
+    Raising         = 0x09, // M2 raising pallet after load
+    DomeOpenWarning = 0x0A, // PG3 open >30 s (warning, not sticky Fault)
 };
 
 // Input IDs carried by CanEvent::InputChanged.

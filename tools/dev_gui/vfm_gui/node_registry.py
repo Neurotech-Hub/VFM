@@ -45,6 +45,7 @@ class NodeState:
     pg2: bool = False                       # actuator at home/down
     pg3: bool = False                       # dome opened
     fault_code: ServiceStatus = ServiceStatus.Ok
+    dome_open_warning: bool = False         # PG3 open >30 s (from DomeOpenWarning)
 
     # Connectivity
     last_heartbeat_time: Optional[float] = None
@@ -69,7 +70,11 @@ class NodeState:
     def status_label(self) -> str:
         if not self.online:
             return "OFFLINE"
-        return self.dispense_state.name.upper()
+        # SeekingAway groups with LOWERING for the tile.
+        labels = {
+            DispenseState.SeekingAway: "LOWERING",
+        }
+        return labels.get(self.dispense_state, self.dispense_state.name.upper())
 
     @property
     def status_color(self) -> tuple[int, int, int, int]:
@@ -81,11 +86,11 @@ class NodeState:
             return (220, 50, 50, 255)     # red
         if s == DispenseState.Idle:
             return (60, 200, 80, 255)     # green
-        if s == DispenseState.Presented:
+        if s in (DispenseState.Presented, DispenseState.AccessAttempt):
             return (50, 200, 220, 255)    # cyan
         if s == DispenseState.SeekingAway:
             return (60, 130, 220, 255)    # blue (homing)
-        # Lowering / Feeding / Raising
+        # Lowering / Loading / Raising
         return (60, 130, 220, 255)        # blue
 
 
@@ -137,20 +142,32 @@ class NodeRegistry:
             # Node is heartbeating even without formal discovery (e.g. manual ID)
             node.discovery_state = "Enabled"
 
-    def update_from_event(self, node_id: int, event: CanEvent) -> None:
+    def update_from_event(
+        self,
+        node_id: int,
+        event: CanEvent,
+        fault_code: Optional[ServiceStatus] = None,
+    ) -> None:
         """Update node state based on a received event."""
         node = self._get_or_create(node_id)
         node.online = True
         # Mirror dispense state transitions from events for better responsiveness
         # (the next heartbeat will confirm the actual state anyway)
         state_map = {
+            CanEvent.Lowering:        DispenseState.Lowering,
+            CanEvent.Loading:         DispenseState.Loading,
             CanEvent.PelletLoaded:    DispenseState.Raising,
+            CanEvent.Raising:         DispenseState.Raising,
             CanEvent.PelletPresented: DispenseState.Presented,
-            CanEvent.AccessAttempt:   DispenseState.Presented,
+            CanEvent.AccessAttempt:   DispenseState.AccessAttempt,
             CanEvent.Fault:           DispenseState.Fault,
         }
         if event in state_map:
             node.dispense_state = state_map[event]
+        if event == CanEvent.Fault and fault_code is not None:
+            node.fault_code = fault_code
+        if event == CanEvent.DomeOpenWarning:
+            node.dome_open_warning = True
 
     def update_from_input(self, node_id: int, input_id: InputId, active: bool) -> None:
         """Apply an immediate InputChanged event without waiting for heartbeat."""
@@ -162,8 +179,17 @@ class NodeRegistry:
             node.pg2 = active
         elif input_id == InputId.PG3:
             node.pg3 = active
+            if not active:
+                node.dome_open_warning = False
         elif input_id == InputId.Presence:
             node.presence = active
+
+    def clear_fault(self, node_id: int) -> None:
+        node = self._get_or_create(node_id)
+        node.fault_code = ServiceStatus.Ok
+        if node.dispense_state == DispenseState.Fault:
+            node.dispense_state = DispenseState.Idle
+        node.dome_open_warning = False
 
     def register_node(self, node_id: int, mac: bytes, source: str = "ANNOUNCE") -> None:
         """Register a node's MAC address from discovery."""

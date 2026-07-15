@@ -14,11 +14,17 @@ namespace vfm {
 constexpr float    kDefaultMotorSpeed      = 500.0f; // steps/s
 constexpr long     kDefaultLowerSteps      = 2048;   // max seek-away / approach budget
 constexpr long     kDefaultRaiseSteps      = 700;    // M2 up travel from PG2 home
-constexpr long     kDefaultFeedMaxSteps    = 4096;   // M1 max steps before jam fault
+constexpr long     kDefaultFeedMaxSteps    = 4096;   // M1 max steps before timeout
 constexpr uint32_t kDefaultLowerTimeoutMs  = 8000;   // M2 lower / seek-away
 constexpr uint32_t kDefaultFeedTimeoutMs   = 30000;  // M1 pellet load (30 s)
-constexpr uint32_t kDefaultRaiseTimeoutMs  = 8000;   // M2 raise
+constexpr uint32_t kDefaultRaiseTimeoutMs  = 8000;   // M2 raise (step target)
 constexpr uint32_t kPGDebounceMs           = 20;
+// After a PG3 trigger edge, suppress further PG3 event-log edges for this long.
+constexpr uint32_t kPg3EventBlankMs        = 3000;
+// Jam / warning timers
+constexpr uint32_t kPg1JamMs               = 1000;   // PG1 held → Jam
+constexpr uint32_t kPg2ClearOnRaiseMs      = 5000;   // PG2 must clear after raise start
+constexpr uint32_t kDomeOpenWarnMs         = 30000;  // PG3 open → DomeOpenWarning
 
 // ---------------------------------------------------------------------------
 class DispenserService {
@@ -40,11 +46,25 @@ public:
     uint32_t      pelletCount() const { return pelletCount_; }
     DispenseEvent takeEvent();
 
+    // Sticky fault code while in Fault state (Timeout / Jam); Ok otherwise.
+    ServiceStatus faultCode() const { return lastFault_; }
+
     // Photogate logical state (true = triggered for that gate's role)
     // PG1/PG2: beam break = pin LOW. PG3: dome open = pin HIGH (idle LOW).
-    bool pg1() const { return pg1State_; } // pellet in cup
+    bool pg1() const { return pg1State_; } // pellet in cup / drop detect
     bool pg2() const { return pg2State_; } // actuator at home / down
     bool pg3() const { return pg3State_; } // dome open
+
+    // True while PG3 rising/falling edges should be ignored for event logging
+    // (AccessAttempt + CanEvent::InputChanged). Sensing for heartbeat still updates.
+    bool pg3EventBlanked() const {
+        return pg3BlankUntilMs_ != 0 && (int32_t)(millis() - pg3BlankUntilMs_) < 0;
+    }
+
+    // Start / refresh the PG3 event-log blank window (default 3 s).
+    void blankPg3Events() {
+        pg3BlankUntilMs_ = millis() + kPg3EventBlankMs;
+    }
 
     void setMotorSpeed(float stepsPerSec) {
         motorSpeed_ = stepsPerSec;
@@ -72,10 +92,18 @@ private:
     DispenseState state_;
     DispenseEvent pendingEvent_;
     uint32_t      pelletCount_;
+    ServiceStatus lastFault_;
 
     uint32_t motionStartMs_;
     long     motor2Target_;
-    bool     pg3WasOpen_;     // edge detect for AccessAttempt (B2)
+    bool     pg3WasOpen_;       // edge detect for AccessAttempt / blanking
+    uint32_t pg3BlankUntilMs_;  // millis() deadline; 0 = not blanking
+
+    // Jam / warning timers
+    uint32_t pg1OnSinceMs_;     // when PG1 became true; 0 = currently clear
+    uint32_t raiseStartMs_;     // when Raising began (for PG2 clear check)
+    uint32_t pg3OpenSinceMs_;   // when PG3 became true; 0 = currently closed
+    bool     domeWarnLatched_;  // one-shot DomeOpenWarning per open bout
 
     // Tuning
     float    motorSpeed_;
@@ -91,10 +119,12 @@ private:
     uint32_t pg1LastChangeMs_, pg2LastChangeMs_, pg3LastChangeMs_;
 
     void updatePhotogates();
+    void checkPg1Jam();
+    void checkDomeOpenWarning();
     void setState(DispenseState next);
     void setEvent(DispenseEvent ev);
     void haltMotors();              // setSpeed(0) + disableOutputs — never stop()
-    void faultNow();
+    void faultNow(ServiceStatus code);
     bool phaseTimedOut(uint32_t timeoutMs) const;
 
     // M2 direction: forward (positive speed) = UP, reverse (negative) = DOWN

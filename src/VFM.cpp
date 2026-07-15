@@ -166,6 +166,7 @@ bool VFM::begin() {
     reportedPg2_      = dispenser_.pg2();
     reportedPg3_      = dispenser_.pg3();
     reportedPresence_ = presence_;
+    lastReportedDispenseState_ = dispenser_.state();
 
 
 
@@ -207,7 +208,12 @@ void VFM::update() {
 
     handleInputEvents();
 
+    // Milestone events (Loaded / Presented / Access / Fault) first, then
+    // phase-entry events (Lowering / Loading / Raising) so a same-tick
+    // PG1→Raising transition logs as Loaded then Raising.
     handleDispenserEvents();
+
+    handleDispensePhaseEvents();
 
     sendHeartbeatIfDue();
 
@@ -277,6 +283,8 @@ void VFM::handleDispenserEvents() {
 
         case DispenseEvent::AccessAttempt:   canEv = CanEvent::AccessAttempt;   break;
 
+        case DispenseEvent::DomeOpenWarning: canEv = CanEvent::DomeOpenWarning; break;
+
         case DispenseEvent::Fault:
 
             canEv = CanEvent::Fault;
@@ -305,7 +313,21 @@ void VFM::handleDispenserEvents() {
 
 
 
-    // Attach pellet count as one extra byte in the event payload
+    if (ev == DispenseEvent::Fault) {
+
+        // Fault payload: byte[0] unused by count convention — send fault code
+
+        uint8_t extra[1] = { static_cast<uint8_t>(dispenser_.faultCode()) };
+
+        can_.sendEvent(canEv, extra, 1);
+
+        return;
+
+    }
+
+
+
+    // Attach pellet count as two extra bytes in the event payload
 
     uint8_t extra[2];
 
@@ -317,6 +339,58 @@ void VFM::handleDispenserEvents() {
 
     can_.sendEvent(canEv, extra, 2);
 
+}
+
+
+// ---------------------------------------------------------------------------
+// Publish dispenser phase entries in real time (not waiting for heartbeat):
+//   Lowering — M2 seeking/approaching PG2
+//   Loading  — M1 feeding (Feeding state)
+//   Raising  — M2 raising after PG1 load
+// Loaded is still sent via PelletLoaded in handleDispenserEvents().
+// ---------------------------------------------------------------------------
+
+void VFM::handleDispensePhaseEvents() {
+
+    if (!identity_.isEnabled() || can_.nodeId() == 0) return;
+
+    DispenseState s = dispenser_.state();
+    if (s == lastReportedDispenseState_) return;
+
+    DispenseState prev = lastReportedDispenseState_;
+    lastReportedDispenseState_ = s;
+
+    switch (s) {
+        case DispenseState::SeekingAway:
+        case DispenseState::Lowering:
+            // Treat SeekingAway + Lowering as one user-facing "Lowering" phase;
+            // do not emit a second Lowering when SeekingAway hands off to Lowering.
+            if (prev != DispenseState::SeekingAway && prev != DispenseState::Lowering) {
+                sendPhaseEvent(CanEvent::Lowering);
+            }
+            break;
+
+        case DispenseState::Feeding:
+            sendPhaseEvent(CanEvent::Loading);
+            break;
+
+        case DispenseState::Raising:
+            sendPhaseEvent(CanEvent::Raising);
+            break;
+
+        default:
+            break;
+    }
+}
+
+
+void VFM::sendPhaseEvent(CanEvent ev) {
+
+    uint8_t extra[2];
+    uint32_t count = dispenser_.pelletCount();
+    extra[0] = static_cast<uint8_t>(count & 0xFF);
+    extra[1] = static_cast<uint8_t>((count >> 8) & 0xFF);
+    can_.sendEvent(ev, extra, 2);
 }
 
 
@@ -344,8 +418,18 @@ void VFM::handleInputEvents() {
         sendInputChanged(InputId::PG2, pg2);
     }
     if (pg3 != reportedPg3_) {
-        reportedPg3_ = pg3;
-        sendInputChanged(InputId::PG3, pg3);
+        // Absorb PG3 edges during the post-trigger blank so the event log
+        // is not spammed by bounce / repeated open-close (3 s window).
+        if (dispenser_.pg3EventBlanked()) {
+            reportedPg3_ = pg3;
+        } else {
+            reportedPg3_ = pg3;
+            sendInputChanged(InputId::PG3, pg3);
+            // First rising edge of a burst starts the blank; that edge is logged.
+            if (pg3) {
+                dispenser_.blankPg3Events();
+            }
+        }
     }
     if (presence_ != reportedPresence_) {
         reportedPresence_ = presence_;
@@ -385,11 +469,7 @@ static HeartbeatPayload buildHeartbeat(const DispenserService &d, bool presence)
 
                        (d.pg3() ? 0x04 : 0);
 
-    p.faultCode      = (d.state() == DispenseState::Fault)
-
-                           ? static_cast<uint8_t>(ServiceStatus::Jam)
-
-                           : static_cast<uint8_t>(ServiceStatus::Ok);
+    p.faultCode      = static_cast<uint8_t>(d.faultCode());
 
     return p;
 

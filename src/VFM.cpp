@@ -417,21 +417,11 @@ void VFM::handleInputEvents() {
         reportedPg2_ = pg2;
         sendInputChanged(InputId::PG2, pg2);
     }
-    if (pg3 != reportedPg3_) {
-        // Blank starts after a completed high→low cycle. During the blank,
-        // absorb edges so bounce / chatter does not spam the event log.
-        if (dispenser_.pg3EventBlanked()) {
-            reportedPg3_ = pg3;
-        } else {
-            const bool wasOpen = reportedPg3_;
-            reportedPg3_ = pg3;
-            sendInputChanged(InputId::PG3, pg3);
-            // Falling edge ends the trigger cycle → start 3 s blindness.
-            // Rising is always logged when not blanked (including after blank).
-            if (wasOpen && !pg3) {
-                dispenser_.blankPg3Events();
-            }
-        }
+    if (pg3 != reportedPg3_ && !dispenser_.pg3EventBlanked()) {
+        const bool wasOpen = reportedPg3_;
+        reportedPg3_ = pg3;
+        sendInputChanged(InputId::PG3, pg3);
+        if (wasOpen && !pg3) dispenser_.blankPg3Events();  // blank after full cycle
     }
     if (presence_ != reportedPresence_) {
         reportedPresence_ = presence_;

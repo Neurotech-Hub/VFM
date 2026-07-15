@@ -145,16 +145,14 @@ void DispenserService::update() {
             break;
 
         case DispenseState::Presented:
-            // B2: rising edge of dome-open → AccessAttempt; stay Presented.
-            // 3 s event blank starts after high→low (via VFM InputChanged), not here.
-            if (pg3EventBlanked()) {
+            // Rising → AccessAttempt. Blank (after high→low) freezes edge state
+            // so a high that spans blank expiry still fires once.
+            if (!pg3EventBlanked()) {
+                if (pg3State_ && !pg3WasOpen_) {
+                    setEvent(DispenseEvent::AccessAttempt);
+                }
                 pg3WasOpen_ = pg3State_;
-                break;
             }
-            if (pg3State_ && !pg3WasOpen_) {
-                setEvent(DispenseEvent::AccessAttempt);
-            }
-            pg3WasOpen_ = pg3State_;
             break;
     }
 }

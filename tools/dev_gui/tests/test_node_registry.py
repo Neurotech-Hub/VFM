@@ -9,6 +9,7 @@ import pytest
 from vfm_gui.node_registry import NodeRegistry, NodeState
 from vfm_gui.protocol import (
     CanEvent,
+    InputId,
     DispenseState,
     ServiceStatus,
     HeartbeatPayload,
@@ -90,6 +91,18 @@ class TestNodeRegistry:
         reg.update_from_heartbeat(1, make_hb())
         reg.update_from_event(1, CanEvent.Fault)
         assert reg.get(1).dispense_state == DispenseState.Fault
+
+    def test_input_event_updates_without_heartbeat(self):
+        reg = NodeRegistry(1)
+        reg.update_from_input(1, InputId.PG1, True)
+        reg.update_from_input(1, InputId.Presence, True)
+        node = reg.get(1)
+        assert node.pg1 is True
+        assert node.presence is True
+        assert node.online is True
+
+        reg.update_from_input(1, InputId.PG1, False)
+        assert node.pg1 is False
 
     def test_staleness_marks_offline(self):
         reg = NodeRegistry(1)

@@ -151,8 +151,8 @@ The base station keeps a dictionary of discovered modules in
 |---------------|------------------|-------------------------------|
 | base → node   | `0x100 + nodeId` | Command (Dispense, Abort, …)  |
 | base → all    | `0x100`          | Broadcast command             |
-| node → base   | `0x200 + nodeId` | Heartbeat (1 Hz)              |
-| node → base   | `0x300 + nodeId` | Event (Loaded/Presented/Taken/Fault/Pong) |
+| node → base   | `0x200 + nodeId` | Periodic heartbeat/status snapshot |
+| node → base   | `0x300 + nodeId` | Immediate event (dispense, fault, Pong, input change) |
 | node → base   | `0x080`          | ANNOUNCE (first boot)         |
 | base → node   | `0x081`          | ASSIGN (node ID assignment)   |
 | node → base   | `0x082`          | ACK                           |
@@ -161,6 +161,11 @@ The base station keeps a dictionary of discovered modules in
 Broadcast command opcodes include `ClearId` (`0x07`) — the GUI **Clear All IDs**
 button clears `~/.vfm/mac_id_registry.json`, broadcasts ClearId so every node
 wipes its NVS ID, then rediscovers and rebuilds the MAC↔ID dictionary.
+
+`InputChanged` event payloads are `[0x06, inputId, active]`, where input IDs
+are PG1=`1`, PG2=`2`, PG3=`3`, and presence=`4`. These events update the GUI
+indicators and log immediately; heartbeats remain the periodic recovery
+snapshot.
 
 BNC IN/OUT activity is not a CAN frame — it is logged in the event log with
 `frame_type="BNC"` for a unified timeline alongside CAN traffic.

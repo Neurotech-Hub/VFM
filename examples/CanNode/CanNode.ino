@@ -13,7 +13,7 @@
 // CAN frame reference (250 kbps, 11-bit IDs):
 //   Commands  base->node : 0x100 + nodeId  (0x100 = broadcast)
 //   Heartbeat node->base : 0x200 + nodeId  every ~1 s
-//   Events    node->base : 0x300 + nodeId  on Loaded/Presented/Taken/Fault
+//   Events    node->base : 0x300 + nodeId  on Loaded/Presented/AccessAttempt/Fault
 //   Discovery node<->base: 0x080-0x083
 
 #include <VFM.h>
@@ -46,13 +46,13 @@ static const char *discStr(vfm::DiscoveryState s) {
 
 static const char *stateStr(vfm::DispenseState s) {
     switch (s) {
-        case vfm::DispenseState::Idle:      return "Idle";
-        case vfm::DispenseState::Lowering:  return "Lowering";
-        case vfm::DispenseState::Feeding:   return "Feeding";
-        case vfm::DispenseState::Raising:   return "Raising";
-        case vfm::DispenseState::Presented: return "Presented";
-        case vfm::DispenseState::Taken:     return "Taken";
-        case vfm::DispenseState::Fault:     return "Fault";
+        case vfm::DispenseState::Idle:        return "Idle";
+        case vfm::DispenseState::SeekingAway: return "SeekingAway";
+        case vfm::DispenseState::Lowering:    return "Lowering";
+        case vfm::DispenseState::Feeding:     return "Feeding";
+        case vfm::DispenseState::Raising:     return "Raising";
+        case vfm::DispenseState::Presented:   return "Presented";
+        case vfm::DispenseState::Fault:       return "Fault";
     }
     return "?";
 }

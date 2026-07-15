@@ -8,6 +8,7 @@ import pytest
 from vfm_gui.protocol import (
     CanCmd,
     CanEvent,
+    InputId,
     DispenseState,
     ServiceStatus,
     CAN_CMD_BASE,
@@ -23,6 +24,7 @@ from vfm_gui.protocol import (
     build_event_frame,
     parse_heartbeat,
     parse_event,
+    parse_input_changed,
     parse_discovery,
     classify_frame,
     format_mac,
@@ -140,6 +142,17 @@ class TestParseEvent:
 
     def test_unknown_event(self):
         assert parse_event(bytes([0xFF])) is None
+
+    def test_input_changed(self):
+        ev = parse_event(bytes([CanEvent.InputChanged, InputId.PG1, 1]))
+        changed = parse_input_changed(ev)
+        assert changed is not None
+        assert changed.input_id == InputId.PG1
+        assert changed.active is True
+
+    def test_input_changed_rejects_short_payload(self):
+        ev = parse_event(bytes([CanEvent.InputChanged, InputId.PG2]))
+        assert parse_input_changed(ev) is None
 
 
 class TestParseDiscovery:

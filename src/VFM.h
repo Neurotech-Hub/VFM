@@ -69,6 +69,13 @@ private:
     bool     presence_;
     uint16_t touchThreshold_;
 
+    // Last input states published through CanEvent::InputChanged. These let
+    // the GUI react immediately instead of waiting for the next heartbeat.
+    bool reportedPg1_      = false;
+    bool reportedPg2_      = false;
+    bool reportedPg3_      = false;
+    bool reportedPresence_ = false;
+
     // Button (PIN_BTN, active LOW) long-press state
     uint32_t btnHoldMs_       = 1000; // required hold duration
     uint32_t btnPressStartMs_ = 0;    // millis() when button first went LOW
@@ -82,6 +89,8 @@ private:
     bool     pingBlinkActive_  = false;
 
     void handleDispenserEvents();
+    void handleInputEvents();
+    void sendInputChanged(InputId input, bool active);
     void sendHeartbeatIfDue();
     void updateTouch();
     void updateButton();

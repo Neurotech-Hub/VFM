@@ -33,20 +33,29 @@ class CanEvent(IntEnum):
     """Events sent from a node to the base station (CAN ID 0x300 + nodeId)."""
     PelletLoaded    = 0x01
     PelletPresented = 0x02
-    PelletTaken     = 0x03
+    AccessAttempt   = 0x03
     Fault           = 0x04
-    Pong            = 0x05 
+    Pong            = 0x05
+    InputChanged    = 0x06
+
+
+class InputId(IntEnum):
+    """Inputs reported immediately by CanEvent.InputChanged."""
+    PG1      = 0x01
+    PG2      = 0x02
+    PG3      = 0x03
+    Presence = 0x04
 
 
 class DispenseState(IntEnum):
     """Dispenser FSM states carried in heartbeat byte 0."""
-    Idle      = 0
-    Lowering  = 1  # M2 driving actuator down
-    Feeding   = 2  # M1 feeding pellet
-    Raising   = 3  # M2 driving actuator up
-    Presented = 4  # Pellet at top, waiting for mouse
-    Taken     = 5  # PG3 fired — brief acknowledgement
-    Fault     = 6  # Timeout / jam
+    Idle        = 0
+    Lowering    = 1  # M2 down until PG2
+    Feeding     = 2  # M1 feeding pellet
+    Raising     = 3  # M2 up by step count
+    Presented   = 4  # Pellet at top; waits for Abort / next Dispense
+    SeekingAway = 5  # M2 up until PG2 clears (was Taken)
+    Fault       = 6  # Timeout / jam
 
 
 class ServiceStatus(IntEnum):
@@ -150,6 +159,12 @@ class EventPayload:
     raw_extra: bytes  # extra bytes beyond byte 0
 
 
+@dataclass
+class InputChangedPayload:
+    input_id: InputId
+    active: bool
+
+
 def parse_event(data: bytes) -> Optional[EventPayload]:
     """Decode an event frame payload. Returns None if data is empty."""
     if not data:
@@ -159,6 +174,17 @@ def parse_event(data: bytes) -> Optional[EventPayload]:
     except ValueError:
         return None
     return EventPayload(event=event, raw_extra=data[1:])
+
+
+def parse_input_changed(event: EventPayload) -> Optional[InputChangedPayload]:
+    """Decode InputChanged extra bytes: inputId(1), active(0/1)."""
+    if event.event != CanEvent.InputChanged or len(event.raw_extra) < 2:
+        return None
+    try:
+        input_id = InputId(event.raw_extra[0])
+    except ValueError:
+        return None
+    return InputChangedPayload(input_id=input_id, active=bool(event.raw_extra[1]))
 
 
 # ---------------------------------------------------------------------------

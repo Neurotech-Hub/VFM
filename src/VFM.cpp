@@ -159,6 +159,14 @@ bool VFM::begin() {
 
     pinMode(PIN_BTN, INPUT_PULLUP);
 
+    // Seed the edge-reporting snapshots from real inputs so startup levels do
+    // not generate false InputChanged events.
+    updateTouch();
+    reportedPg1_      = dispenser_.pg1();
+    reportedPg2_      = dispenser_.pg2();
+    reportedPg3_      = dispenser_.pg3();
+    reportedPresence_ = presence_;
+
 
 
     // 7. Start discovery FSM (requires CAN to be up)
@@ -196,6 +204,8 @@ void VFM::update() {
     updateTouch();
 
     updateButton();
+
+    handleInputEvents();
 
     handleDispenserEvents();
 
@@ -265,7 +275,7 @@ void VFM::handleDispenserEvents() {
 
         case DispenseEvent::PelletPresented: canEv = CanEvent::PelletPresented; break;
 
-        case DispenseEvent::PelletTaken:     canEv = CanEvent::PelletTaken;     break;
+        case DispenseEvent::AccessAttempt:   canEv = CanEvent::AccessAttempt;   break;
 
         case DispenseEvent::Fault:
 
@@ -287,7 +297,7 @@ void VFM::handleDispenserEvents() {
 
     if (ev == DispenseEvent::PelletLoaded || ev == DispenseEvent::PelletPresented ||
 
-        ev == DispenseEvent::PelletTaken) {
+        ev == DispenseEvent::AccessAttempt) {
 
         leds_.setStatusLed(false);
 
@@ -307,6 +317,50 @@ void VFM::handleDispenserEvents() {
 
     can_.sendEvent(canEv, extra, 2);
 
+}
+
+
+// ---------------------------------------------------------------------------
+// Publish every debounced input edge immediately. Heartbeats remain the
+// periodic state snapshot/recovery mechanism; these events are the real-time
+// path used by the GUI event log and circular input indicators.
+// ---------------------------------------------------------------------------
+
+void VFM::handleInputEvents() {
+
+    // Do not publish operational events until this node has a valid CAN ID.
+    if (!identity_.isEnabled() || can_.nodeId() == 0) return;
+
+    bool pg1 = dispenser_.pg1();
+    bool pg2 = dispenser_.pg2();
+    bool pg3 = dispenser_.pg3();
+
+    if (pg1 != reportedPg1_) {
+        reportedPg1_ = pg1;
+        sendInputChanged(InputId::PG1, pg1);
+    }
+    if (pg2 != reportedPg2_) {
+        reportedPg2_ = pg2;
+        sendInputChanged(InputId::PG2, pg2);
+    }
+    if (pg3 != reportedPg3_) {
+        reportedPg3_ = pg3;
+        sendInputChanged(InputId::PG3, pg3);
+    }
+    if (presence_ != reportedPresence_) {
+        reportedPresence_ = presence_;
+        sendInputChanged(InputId::Presence, presence_);
+    }
+}
+
+
+void VFM::sendInputChanged(InputId input, bool active) {
+
+    uint8_t payload[2] = {
+        static_cast<uint8_t>(input),
+        static_cast<uint8_t>(active ? 1 : 0)
+    };
+    can_.sendEvent(CanEvent::InputChanged, payload, 2);
 }
 
 

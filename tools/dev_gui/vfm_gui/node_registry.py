@@ -18,6 +18,7 @@ from .protocol import (
     CanEvent,
     DispenseState,
     HeartbeatPayload,
+    InputId,
     ServiceStatus,
     format_mac,
 )
@@ -82,8 +83,8 @@ class NodeState:
             return (60, 200, 80, 255)     # green
         if s == DispenseState.Presented:
             return (50, 200, 220, 255)    # cyan
-        if s == DispenseState.Taken:
-            return (220, 200, 50, 255)    # yellow
+        if s == DispenseState.SeekingAway:
+            return (60, 130, 220, 255)    # blue (homing)
         # Lowering / Feeding / Raising
         return (60, 130, 220, 255)        # blue
 
@@ -145,11 +146,24 @@ class NodeRegistry:
         state_map = {
             CanEvent.PelletLoaded:    DispenseState.Raising,
             CanEvent.PelletPresented: DispenseState.Presented,
-            CanEvent.PelletTaken:     DispenseState.Taken,
+            CanEvent.AccessAttempt:   DispenseState.Presented,
             CanEvent.Fault:           DispenseState.Fault,
         }
         if event in state_map:
             node.dispense_state = state_map[event]
+
+    def update_from_input(self, node_id: int, input_id: InputId, active: bool) -> None:
+        """Apply an immediate InputChanged event without waiting for heartbeat."""
+        node = self._get_or_create(node_id)
+        node.online = True
+        if input_id == InputId.PG1:
+            node.pg1 = active
+        elif input_id == InputId.PG2:
+            node.pg2 = active
+        elif input_id == InputId.PG3:
+            node.pg3 = active
+        elif input_id == InputId.Presence:
+            node.presence = active
 
     def register_node(self, node_id: int, mac: bytes, source: str = "ANNOUNCE") -> None:
         """Register a node's MAC address from discovery."""

@@ -15,7 +15,8 @@ Each simulated node:
   - Sends heartbeats at 1 Hz
   - Responds to Ping with Pong
   - On Dispense: simulates the full event sequence with realistic timing
-    PelletLoaded (~1 s) → PelletPresented (~2 s) → PelletTaken (~3–5 s random)
+    PelletLoaded (~1 s) → PelletPresented (~2 s) → AccessAttempt (~3–5 s random)
+    (stays Presented until Abort / next Dispense)
   - On Abort: returns to Idle immediately
 
 Press Ctrl+C to stop.
@@ -50,6 +51,7 @@ try:
         CanCmd,
         CanEvent,
         DispenseState,
+        InputId,
         ServiceStatus,
         HeartbeatPayload,
         CAN_CMD_BASE,
@@ -73,10 +75,13 @@ except ImportError:
         Ping=0x01; Dispense=0x02; Abort=0x03; AssignId=0x04; SetConfig=0x05; ReqStatus=0x06; ClearId=0x07
 
     class CanEvent(IntEnum):
-        PelletLoaded=0x01; PelletPresented=0x02; PelletTaken=0x03; Fault=0x04; Pong=0x05
+        PelletLoaded=0x01; PelletPresented=0x02; AccessAttempt=0x03; Fault=0x04; Pong=0x05; InputChanged=0x06
+
+    class InputId(IntEnum):
+        PG1=0x01; PG2=0x02; PG3=0x03; Presence=0x04
 
     class DispenseState(IntEnum):
-        Idle=0; Lowering=1; Feeding=2; Raising=3; Presented=4; Taken=5; Fault=6
+        Idle=0; Lowering=1; Feeding=2; Raising=3; Presented=4; SeekingAway=5; Fault=6
 
     class ServiceStatus(IntEnum):
         Ok=0; NotInitialized=1; Timeout=2; Jam=3; InvalidData=4
@@ -302,11 +307,13 @@ class NodeSimulator:
                 print(f"  [SIM] Node {node.node_id}: status LED blink (Ping)", flush=True)
 
             elif cmd == CanCmd.Dispense:
-                if node.dispense_state == DispenseState.Idle:
+                # Idle or Presented
+                if node.dispense_state in (DispenseState.Idle, DispenseState.Presented):
                     node.dispense_state = DispenseState.Lowering
                     node.phase          = SimNodePhase.Dispensing
                     node.dispense_step  = 0
                     node.dispense_step_time = time.time()
+                    node.pg1 = node.pg2 = node.pg3 = False
                     print(f"  [SIM] Node {node.node_id}: Dispense started", flush=True)
 
             elif cmd == CanCmd.Abort:
@@ -351,6 +358,7 @@ class NodeSimulator:
                 print(f"  [SIM] Node {node.node_id}: FAULT injected", flush=True)
                 return
             node.pg1 = True
+            self._send_input_changed(node, InputId.PG1, True)
             node.dispense_state = DispenseState.Feeding
             self._send_event(node, CanEvent.PelletLoaded)
             node.dispense_step      = 1
@@ -359,6 +367,7 @@ class NodeSimulator:
         # Step 1 → 2: PelletPresented after PRESENTED_DELAY
         elif node.dispense_step == 1 and elapsed >= self.PRESENTED_DELAY:
             node.pg2 = True
+            self._send_input_changed(node, InputId.PG2, True)
             node.dispense_state = DispenseState.Presented
             self._send_event(node, CanEvent.PelletPresented)
             taken_delay = random.uniform(self.TAKEN_DELAY_MIN, self.TAKEN_DELAY_MAX)
@@ -366,21 +375,21 @@ class NodeSimulator:
             node.dispense_step      = 2
             node.dispense_step_time = now
 
-        # Step 2 → done: PelletTaken after random delay
+        # Step 2 → AccessAttempt after random delay; stay Presented (B2)
         elif node.dispense_step == 2 and elapsed >= getattr(node, "_taken_delay", self.TAKEN_DELAY_MAX):
             node.pg3 = True
-            node.dispense_state = DispenseState.Taken
-            self._send_event(node, CanEvent.PelletTaken)
+            self._send_input_changed(node, InputId.PG3, True)
+            # Stay in Presented — AccessAttempt is not a confirmed take
+            self._send_event(node, CanEvent.AccessAttempt)
             node.dispense_step = 3
             node.dispense_step_time = now
 
-        # Step 3: brief Taken state, then back to Idle
+        # Step 3: clear PG3 beam after a short open pulse; remain Presented
         elif node.dispense_step == 3 and elapsed >= 0.5:
-            node.dispense_state = DispenseState.Idle
-            node.phase          = SimNodePhase.Enabled
-            node.pg1 = node.pg2 = node.pg3 = False
-            node.fault_code = ServiceStatus.Ok
-            print(f"  [SIM] Node {node.node_id}: Dispense complete", flush=True)
+            self._send_input_changed(node, InputId.PG3, False)
+            node.pg3 = False
+            node.dispense_step = 4  # waiting for Abort / next Dispense
+            print(f"  [SIM] Node {node.node_id}: AccessAttempt (still Presented)", flush=True)
 
     # ------------------------------------------------------------------
     # Frame senders
@@ -416,6 +425,9 @@ class NodeSimulator:
         msg = can.Message(arbitration_id=arb_id, data=data, is_extended_id=False)
         self._bus.send(msg)
         print(f"  [SIM] Node {node.node_id}: → {event.name}", flush=True)
+
+    def _send_input_changed(self, node: SimNode, input_id: InputId, active: bool) -> None:
+        self._send_event(node, CanEvent.InputChanged, bytes([int(input_id), int(active)]))
 
 
 # ---------------------------------------------------------------------------

@@ -20,12 +20,12 @@ enum class ServiceStatus : uint8_t {
 // ---------------------------------------------------------------------------
 enum class DispenseState : uint8_t {
     Idle = 0,
-    Lowering,   // M2 driving actuator down until PG2 LOW
-    Feeding,    // M1 feeding pellet until PG1 LOW
-    Raising,    // M2 driving actuator up to top (step-count target)
-    Presented,  // Pellet at top, waiting for mouse
-    Taken,      // PG3 fired (dome opened) – brief acknowledgement state
-    Fault,      // Timeout / jam; cleared by abort()
+    Lowering    = 1, // M2 down until PG2 triggers (home / load position)
+    Feeding     = 2, // M1 feeding pellet until PG1 triggers
+    Raising     = 3, // M2 up by raiseSteps_ from home
+    Presented   = 4, // Pellet at top; waits until Abort or next Dispense
+    SeekingAway = 5, // M2 up until PG2 clears (was Taken; wire value reused)
+    Fault       = 6, // Timeout / jam; sticky until abort()
 };
 
 // ---------------------------------------------------------------------------
@@ -35,8 +35,8 @@ enum class DispenseState : uint8_t {
 enum class DispenseEvent : uint8_t {
     None = 0,
     PelletLoaded,    // PG1 fired: pellet seated in actuator cup
-    PelletPresented, // Actuator reached top
-    PelletTaken,     // PG3 fired: mouse opened dome
+    PelletPresented, // Actuator reached top (also increments pelletCount)
+    AccessAttempt,   // PG3 dome open (beam break) — not a confirmed take
     Fault,           // Timeout or jam detected
 };
 
@@ -61,9 +61,18 @@ enum class CanCmd : uint8_t {
 enum class CanEvent : uint8_t {
     PelletLoaded    = 0x01,
     PelletPresented = 0x02,
-    PelletTaken     = 0x03,
+    AccessAttempt   = 0x03, // was PelletTaken; dome open / access attempt only
     Fault           = 0x04,
     Pong            = 0x05,
+    InputChanged    = 0x06, // payload: InputId(1), active(0/1)
+};
+
+// Input IDs carried by CanEvent::InputChanged.
+enum class InputId : uint8_t {
+    PG1      = 0x01,
+    PG2      = 0x02,
+    PG3      = 0x03,
+    Presence = 0x04,
 };
 
 // ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ from .protocol import (
     node_id_from_event_id,
     node_id_from_hb_id,
     parse_event,
+    parse_input_changed,
     parse_heartbeat,
     parse_discovery,
     build_setconfig_heartbeat,
@@ -521,15 +522,15 @@ class VFMApp:
                 tags["hb_text"] = dpg.add_text("—")
                 dpg.add_spacer(width=12)
                 dpg.add_text("Presence:", color=(160,165,175,255))
-                tags["presence_text"] = dpg.add_text("—")
+                tags["presence_text"] = dpg.add_text("○", color=_COLOR_GREY)
 
             with dpg.group(horizontal=True):
                 dpg.add_text("PG:", color=(160,165,175,255))
-                tags["pg1_text"] = dpg.add_text("1:○")
+                tags["pg1_text"] = dpg.add_text("PG1: ○")
                 dpg.add_spacer(width=6)
-                tags["pg2_text"] = dpg.add_text("2:○")
+                tags["pg2_text"] = dpg.add_text("PG2: ○")
                 dpg.add_spacer(width=6)
-                tags["pg3_text"] = dpg.add_text("3:○")
+                tags["pg3_text"] = dpg.add_text("PG3: ○")
 
             with dpg.group(horizontal=True):
                 dpg.add_text("Fault:", color=(160,165,175,255))
@@ -793,9 +794,32 @@ class VFMApp:
                         self._handle_pong_mac(node_id, mac)
                     else:
                         self._maybe_request_mac_via_ping(node_id)
-                    self._registry.update_from_event(node_id, ev.event)
+                    if ev.event == CanEvent.InputChanged:
+                        changed = parse_input_changed(ev)
+                        if changed:
+                            self._registry.update_from_input(
+                                node_id, changed.input_id, changed.active
+                            )
+                            if changed.input_id.name == "Presence":
+                                state_name = "Detected" if changed.active else "Cleared"
+                            else:
+                                state_name = "Triggered" if changed.active else "Cleared"
+                            entry_name = f"{changed.input_id.name} {state_name}"
+                            details = f"input={changed.input_id.name} active={int(changed.active)}"
+                        else:
+                            entry_name = "Invalid Input Event"
+                            details = "InputChanged payload must contain input ID and state"
+                    else:
+                        self._registry.update_from_event(node_id, ev.event)
+                        entry_name = ev.event.name
+                        if ev.event in (
+                            CanEvent.PelletLoaded,
+                            CanEvent.PelletPresented,
+                            CanEvent.AccessAttempt,
+                        ) and len(ev.raw_extra) >= 2:
+                            pellet_count = ev.raw_extra[0] | (ev.raw_extra[1] << 8)
+                            details = f"pellet_count={pellet_count}"
                     self._refresh_tile(node_id)
-                    entry_name = ev.event.name
                     self._maybe_fire_bnc_out(entry_name)
                     if ev.event == CanEvent.PelletPresented:
                         self._arm_chained_schedules(node_id)
@@ -809,7 +833,7 @@ class VFMApp:
                     0x081: "ASSIGN",
                     0x082: "ACK",
                     0x083: "REJOIN",
-                }.get(arb_id, "?")
+                }.get(arb_id, "Unknown Discovery")
                 if info["mac"]:
                     details = f"MAC={format_mac(info['mac'])}"
                 if info["node_id"] is not None:
@@ -941,7 +965,7 @@ class VFMApp:
         # Presence
         dpg.configure_item(
             tags["presence_text"],
-            default_value="Yes" if node.presence else "No",
+            default_value="●" if node.presence else "○",
             color=(100, 220, 120, 255) if node.presence else (160, 165, 175, 255),
         )
 
@@ -953,7 +977,7 @@ class VFMApp:
         ]:
             sym = "●" if val else "○"
             col = (100, 220, 120, 255) if val else (160, 165, 175, 255)
-            dpg.configure_item(pg_tag, default_value=f"{label}:{sym}", color=col)
+            dpg.configure_item(pg_tag, default_value=f"PG{label}: {sym}", color=col)
 
         # Fault
         fault_str = node.fault_code.name

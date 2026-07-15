@@ -45,17 +45,16 @@ constexpr uint8_t PIN_M2_A4 = 43; // Blue
 
 // ---------------------------------------------------------------------------
 // Photogates
-// PG1 active LOW : pellet seated in actuator cup
-// PG2 active LOW : actuator at home / down position
-// PG3 active HIGH: dome opened (mouse retrieving pellet)
+// PG1 / PG2: beam break = pin LOW = triggered (INPUT_PULLUP)
+// PG3:      idle LOW; dome open = pin HIGH = triggered (INPUT_PULLDOWN)
 //
 // NOTE: GPIO45 and GPIO46 are ESP32-S3 strapping pins (VDD_SPI / boot mode).
 // They are safe to use as GPIO after boot; ensure external pull resistors
 // do not force unsafe logic levels at reset.
 // ---------------------------------------------------------------------------
-constexpr uint8_t PIN_PG1 = 46; // active LOW  – strapping pin, see note above
-constexpr uint8_t PIN_PG2 = 45; // active LOW  – strapping pin, see note above
-constexpr uint8_t PIN_PG3 = 44; // active HIGH
+constexpr uint8_t PIN_PG1 = 46; // trigger = LOW  – strapping pin, see note above
+constexpr uint8_t PIN_PG2 = 45; // trigger = LOW  – strapping pin, see note above
+constexpr uint8_t PIN_PG3 = 44; // trigger = HIGH (dome open)
 
 // ---------------------------------------------------------------------------
 // Sensing / user IO
@@ -66,6 +65,7 @@ constexpr uint8_t PIN_LED_IO_9   = 9;  // LED_IO_09
 constexpr uint8_t PIN_LED_IO_10  = 10; // LED_IO_10
 constexpr uint8_t PIN_BTN        = 11; // BTN_IO_11
 constexpr uint8_t PIN_USER_IO_6  = 6;  // User_IO_6
+constexpr uint8_t PIN_PGX        = PIN_USER_IO_6; // alternate PG2 bring-up input
 constexpr uint8_t PIN_USER_IO_7  = 7;  // User_IO_7
 constexpr uint8_t PIN_POWER_ST   = 15; // Power_ST
 

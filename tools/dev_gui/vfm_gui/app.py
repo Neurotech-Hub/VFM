@@ -58,8 +58,8 @@ from .protocol import (
 
 WINDOW_W = 1280
 WINDOW_H = 960        
-TILE_W   = 280
-TILE_H   = 318
+TILE_W   = 380
+TILE_H   = 358
 LOG_ROWS = 18        # visible rows in the log table before scroll
 LOG_TABLE_HEIGHT = 220  
 STALE_CHECK_INTERVAL = 1.0  # seconds between staleness sweeps
@@ -246,9 +246,30 @@ class VFMApp:
         dpg.bind_theme(global_theme)
 
     def _setup_fonts(self) -> None:
-        # Character ranges are automatic in current DearPyGui; keep default font.
-        # Monospace font for the log — use default if no system font available.
+        """Register a Unicode-capable font for the GUI.
+
+        The default DearPyGui font can fall back to replacement glyphs for
+        symbols like ●, ○, and other punctuation, which shows up as '?' in the
+        UI. Loading a system font with broader Unicode coverage fixes that.
+        """
+        candidates = [
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/freefont/FreeSans.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+        ]
+        self._font = None
         self._mono_font = None
+
+        for font_path in candidates:
+            if not font_path.exists():
+                continue
+            with dpg.font_registry():
+                self._font = dpg.add_font(str(font_path), 16)
+            dpg.bind_font(self._font)
+            break
+
+        if self._font is None:
+            self._mono_font = None
 
     # ------------------------------------------------------------------
     # Setup Screen
@@ -256,7 +277,7 @@ class VFMApp:
 
     def _build_setup_screen(self) -> None:
         vp_w, vp_h = WINDOW_W, WINDOW_H
-        win_w, win_h = 480, 520
+        win_w, win_h = 480, 620
 
         with dpg.window(
             tag="setup_window",

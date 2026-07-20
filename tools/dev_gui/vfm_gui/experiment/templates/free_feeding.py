@@ -6,7 +6,10 @@ Behavior:
   2. On AccessAttempt (retrieval attempt), log it.
   3. On dome close (PG3 cleared after being open), wait ``reload_delay_s``
      then re-dispense that node.
-  4. End after ``duration`` and/or when total pellets presented reaches
+  4. On Fault (jam / timeout), abort all nodes and **stop the session** —
+     a fault means no pellet was delivered; do not wait for the dome or
+     continue reloading.
+  5. End after ``duration`` and/or when total pellets presented reaches
      ``max_pellets``.
 
 Usage::
@@ -72,10 +75,14 @@ def build(
 
     @exp.on_dome_closed
     def _reload(ctx, ev):
+        if ctx.stop_requested:
+            return
         node_id = ev.node_id
         ctx.log("dome_closed", node=node_id)
 
         def _do_reload():
+            if ctx.stop_requested:
+                return
             ctx.log("reload_dispense", node=node_id)
             ctx.dispense(node_id)
             if pulse_bnc_on_dispense:
@@ -97,13 +104,12 @@ def build(
 
     @exp.on_fault
     def _fault(ctx, ev):
-        ctx.log(
-            "fault",
-            node=ev.node_id,
-            fault_code=ev.data.get("fault_code"),
-        )
-        # Clear the fault so the node can accept the next Dispense.
-        ctx.abort(ev.node_id)
+        """Jam/timeout = no pellet delivered; halt the whole free-feeding run."""
+        fault_code = ev.data.get("fault_code")
+        ctx.log("fault", node=ev.node_id, fault_code=fault_code)
+        # Stop any in-progress dispense on every node and cancel reload timers.
+        ctx.broadcast_abort()
+        ctx.stop(reason=f"fault_node_{ev.node_id}_{fault_code}")
 
     @exp.on_end
     def _end(ctx):

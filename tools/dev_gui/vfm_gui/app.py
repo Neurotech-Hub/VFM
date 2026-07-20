@@ -31,6 +31,8 @@ from .io_manager import BNCInputConfig, BNCOutputConfig, IOManager
 from .log_manager import LogEntry, LogManager
 from .mac_id_registry import DEFAULT_REGISTRY_PATH, MacIdRegistry
 from .node_registry import NodeRegistry
+from .experiment import ExperimentController, load_experiment_defs
+from .experiment.schema import DEFAULT_EXPERIMENTS_DIR, ExperimentDef
 from .protocol import (
     CanCmd,
     CanEvent,
@@ -45,6 +47,7 @@ from .protocol import (
     parse_discovery,
     build_setconfig_heartbeat,
     CAN_EVENT_DISPLAY_NAME,
+    CONFIG_HEARTBEAT_INTERVAL,
     CAN_ID_ANNOUNCE,
     CAN_ID_ASSIGN,
     CAN_ID_ACK,
@@ -65,6 +68,36 @@ LOG_TABLE_HEIGHT = 220
 STALE_CHECK_INTERVAL = 1.0  # seconds between staleness sweeps
 DEFAULT_HEARTBEAT_INTERVAL_S = 5.0  # default node heartbeat interval
 MAC_PING_RETRY_S = 3.0  # min seconds between MAC-resolution Pings to the same node
+
+# Short purpose strings for COMMAND rows in the event log.
+COMMAND_PURPOSE = {
+    CanCmd.Ping: "identify / request MAC",
+    CanCmd.Dispense: "load & present pellet",
+    CanCmd.Abort: "stop motion & clear fault",
+    CanCmd.AssignId: "set node ID",
+    CanCmd.SetConfig: "set config",
+    CanCmd.ReqStatus: "request heartbeat now",
+    CanCmd.ClearId: "wipe stored ID",
+}
+
+BNC_IN_ACTIONS = [
+    "(none)",
+    "dispense_all",
+    "abort_all",
+    "ping_all",
+    "reqstatus_all",
+    "start_experiment",
+    "stop_experiment",
+]
+
+def _bnc_out_trigger_items() -> list:
+    names = sorted({v for v in CAN_EVENT_DISPLAY_NAME.values()})
+    # Include raw event names not in the display map (e.g. Fault, AccessAttempt).
+    for ev in CanEvent:
+        if ev.name not in ("Pong", "InputChanged") and ev.name not in names:
+            names.append(ev.name)
+    names = sorted(set(names))
+    return ["any_event", "fault"] + names
 
 # Status dot color tags (registered once at startup)
 _COLOR_GREEN  = (60,  200, 80,  255)
@@ -183,6 +216,12 @@ class VFMApp:
 
         # Base-station-side dispense scheduler (per node_id)
         self._schedules: Dict[int, ScheduleConfig] = {}
+
+        # Experiment panel (JSON schema → Python templates)
+        self._exp_defs = load_experiment_defs(DEFAULT_EXPERIMENTS_DIR)
+        self._exp = ExperimentController()
+        self._exp_param_tags: Dict[str, int] = {}  # param.key → widget tag
+        self._exp_log_dir = str(Path("~/vfm_logs").expanduser())
 
     # ------------------------------------------------------------------
     # Entry point
@@ -405,6 +444,8 @@ class VFMApp:
             dpg.set_value("setup_error", "Interface name cannot be empty.")
             return
 
+        self._exp_log_dir = log_dir or str(Path("~/vfm_logs").expanduser())
+
         # Open CAN
         try:
             self._can = CanManager(interface=interface, bitrate=bitrate)
@@ -484,6 +525,11 @@ class VFMApp:
 
             # -- BNC / Sync I/O --
             self._build_bnc_panel()
+            dpg.add_spacer(height=6)
+            dpg.add_separator()
+
+            # -- Experiment panel --
+            self._build_experiment_panel()
             dpg.add_spacer(height=6)
             dpg.add_separator()
 
@@ -649,10 +695,8 @@ class VFMApp:
     def _build_bnc_panel(self) -> None:
         dpg.add_text("BNC / Sync I/O", color=(100, 180, 255, 255))
         dpg.add_text(
-            "Action / Trigger fields are free-text placeholders — not tied to a fixed "
-            "list. Recognized convenience keywords (dispense_all, abort_all, ping_all, "
-            "reqstatus_all for inputs; any_event, fault, or an event name for output) "
-            "are dispatched automatically. Anything else is just logged for now.",
+            "BNC IN Action: broadcast command or start/stop the selected experiment. "
+            "BNC OUT Trigger: pulse on matching CAN event name (or any_event).",
             color=(140, 145, 155, 255), wrap=WINDOW_W - 40,
         )
         with dpg.group(horizontal=True):
@@ -681,11 +725,14 @@ class VFMApp:
                 user_data=cfg,
                 callback=lambda s, a, u: setattr(u, "edge", a),
             )
-            dpg.add_input_text(
-                label="Action (placeholder)", default_value=cfg.action, width=180,
-                hint="e.g. dispense_all, log_event, ...",
+            default_action = cfg.action if cfg.action in BNC_IN_ACTIONS else "(none)"
+            dpg.add_combo(
+                label="Action", items=BNC_IN_ACTIONS,
+                default_value=default_action, width=180,
                 user_data=cfg,
-                callback=lambda s, a, u: setattr(u, "action", a),
+                callback=lambda s, a, u: setattr(
+                    u, "action", "" if a == "(none)" else a
+                ),
             )
             dpg.add_checkbox(
                 label="Enabled", default_value=cfg.enabled,
@@ -698,6 +745,8 @@ class VFMApp:
     def _build_bnc_output_box(self) -> None:
         cfg = self._bnc_out_cfg
         tags: dict = {"last_pulse_ts": 0.0}
+        triggers = _bnc_out_trigger_items()
+        default_trigger = cfg.trigger if cfg.trigger in triggers else "any_event"
         with dpg.child_window(width=300, height=180, border=True):
             with dpg.group(horizontal=True):
                 tags["dot"] = dpg.add_text("●", color=_COLOR_GREY)
@@ -714,12 +763,14 @@ class VFMApp:
                 user_data=cfg,
                 callback=lambda s, a, u: setattr(u, "pulse_width_us", a),
             )
-            dpg.add_input_text(
-                label="Trigger (placeholder)", default_value=cfg.trigger, width=180,
-                hint="e.g. pellet_taken, any_event, fault, ...",
+            dpg.add_combo(
+                label="Trigger", items=triggers,
+                default_value=default_trigger, width=180,
                 user_data=cfg,
                 callback=lambda s, a, u: setattr(u, "trigger", a),
             )
+            if not cfg.trigger:
+                cfg.trigger = default_trigger
             dpg.add_checkbox(
                 label="Enabled", default_value=cfg.enabled,
                 user_data=cfg,
@@ -727,6 +778,165 @@ class VFMApp:
             )
             dpg.add_button(label="Manual Pulse", callback=lambda s, a, u: self._on_bnc_manual_pulse())
         self._bnc_tiles["bnc_out"] = tags
+
+    def _build_experiment_panel(self) -> None:
+        labels = [d.label for d in self._exp_defs] or ["(no experiments)"]
+        with dpg.collapsing_header(label="Experiment", default_open=True):
+            if self._exp_defs:
+                dpg.add_text(
+                    self._exp_defs[0].description,
+                    tag="exp_description",
+                    color=(140, 145, 155, 255),
+                    wrap=WINDOW_W - 40,
+                )
+            with dpg.group(horizontal=True):
+                dpg.add_text("Template:", color=(160, 165, 175, 255))
+                dpg.add_combo(
+                    tag="exp_template_combo",
+                    items=labels,
+                    default_value=labels[0],
+                    width=220,
+                    callback=self._on_experiment_template_changed,
+                )
+                dpg.add_button(
+                    tag="exp_start_btn",
+                    label="Start",
+                    width=80,
+                    callback=self._on_experiment_start,
+                )
+                dpg.add_button(
+                    tag="exp_stop_btn",
+                    label="Stop",
+                    width=80,
+                    callback=self._on_experiment_stop,
+                )
+            dpg.add_text("Idle", tag="exp_status_text", color=(160, 165, 175, 255))
+            dpg.add_group(tag="exp_params_group")
+            if self._exp_defs:
+                self._rebuild_experiment_params(self._exp_defs[0])
+
+    def _selected_experiment_def(self) -> Optional[ExperimentDef]:
+        if not self._exp_defs:
+            return None
+        label = dpg.get_value("exp_template_combo") if dpg.does_item_exist("exp_template_combo") else None
+        for d in self._exp_defs:
+            if d.label == label:
+                return d
+        return self._exp_defs[0]
+
+    def _on_experiment_template_changed(self, sender=None, app_data=None, user_data=None) -> None:
+        exp_def = self._selected_experiment_def()
+        if exp_def is None:
+            return
+        if dpg.does_item_exist("exp_description"):
+            dpg.set_value("exp_description", exp_def.description)
+        self._rebuild_experiment_params(exp_def)
+
+    def _rebuild_experiment_params(self, exp_def: ExperimentDef) -> None:
+        if not dpg.does_item_exist("exp_params_group"):
+            return
+        children = dpg.get_item_children("exp_params_group", slot=1) or []
+        for child in children:
+            dpg.delete_item(child)
+        self._exp_param_tags = {}
+
+        for param in exp_def.parameters:
+            tag = f"exp_param_{param.key}"
+            with dpg.group(horizontal=True, parent="exp_params_group"):
+                dpg.add_text(f"{param.label}:", color=(160, 165, 175, 255))
+                if param.type == "bool":
+                    self._exp_param_tags[param.key] = dpg.add_checkbox(
+                        tag=tag,
+                        default_value=bool(param.default),
+                    )
+                elif param.type == "int":
+                    kwargs = {
+                        "tag": tag,
+                        "default_value": int(param.default or 0),
+                        "width": 120,
+                    }
+                    if param.min is not None:
+                        kwargs["min_value"] = int(param.min)
+                        kwargs["min_clamped"] = True
+                    if param.max is not None:
+                        kwargs["max_value"] = int(param.max)
+                        kwargs["max_clamped"] = True
+                    self._exp_param_tags[param.key] = dpg.add_input_int(**kwargs)
+                elif param.type == "float":
+                    kwargs = {
+                        "tag": tag,
+                        "default_value": float(param.default or 0.0),
+                        "width": 120,
+                        "format": "%.2f",
+                    }
+                    if param.min is not None:
+                        kwargs["min_value"] = float(param.min)
+                        kwargs["min_clamped"] = True
+                    if param.max is not None:
+                        kwargs["max_value"] = float(param.max)
+                        kwargs["max_clamped"] = True
+                    self._exp_param_tags[param.key] = dpg.add_input_float(**kwargs)
+                elif param.type == "choice":
+                    opts = param.options or [str(param.default)]
+                    self._exp_param_tags[param.key] = dpg.add_combo(
+                        tag=tag,
+                        items=opts,
+                        default_value=str(param.default if param.default in opts else opts[0]),
+                        width=160,
+                    )
+                else:
+                    self._exp_param_tags[param.key] = dpg.add_input_text(
+                        tag=tag,
+                        default_value="" if param.default is None else str(param.default),
+                        width=160,
+                    )
+                if param.help:
+                    dpg.add_text(param.help, color=(120, 125, 135, 255))
+
+    def _collect_experiment_params(self, exp_def: ExperimentDef) -> dict:
+        values = {}
+        for param in exp_def.parameters:
+            tag = self._exp_param_tags.get(param.key)
+            if tag is None or not dpg.does_item_exist(tag):
+                values[param.key] = param.default
+            else:
+                values[param.key] = dpg.get_value(tag)
+        return values
+
+    def _on_experiment_start(self, sender=None, app_data=None, user_data=None) -> None:
+        exp_def = self._selected_experiment_def()
+        if exp_def is None or self._can is None or self._registry is None:
+            return
+        if self._exp.is_running:
+            return
+        params = self._collect_experiment_params(exp_def)
+        nodes = [n.node_id for n in self._registry.all_nodes()]
+        ok = self._exp.start(
+            exp_def,
+            params=params,
+            nodes=nodes,
+            can=self._can,
+            io=self._io,
+            log=self._log,
+            log_dir=self._exp_log_dir,
+        )
+        if ok:
+            dpg.configure_item("exp_start_btn", enabled=False)
+            self._refresh_experiment_status()
+
+    def _on_experiment_stop(self, sender=None, app_data=None, user_data=None) -> None:
+        if self._exp.is_running:
+            self._exp.stop()
+        if dpg.does_item_exist("exp_start_btn"):
+            dpg.configure_item("exp_start_btn", enabled=True)
+        self._refresh_experiment_status()
+
+    def _refresh_experiment_status(self) -> None:
+        if not dpg.does_item_exist("exp_status_text"):
+            return
+        dpg.set_value("exp_status_text", self._exp.status_line())
+        if dpg.does_item_exist("exp_start_btn"):
+            dpg.configure_item("exp_start_btn", enabled=not self._exp.is_running)
 
     def _build_log_panel(self) -> None:
         dpg.add_text("Event Log", color=(100, 180, 255, 255))
@@ -742,7 +952,7 @@ class VFMApp:
             dpg.add_text("Type:", color=(160,165,175,255))
             dpg.add_combo(
                 tag="log_filter_type",
-                items=["All", "EVENT", "COMMAND", "HEARTBEAT", "DISCOVERY", "BNC"],
+                items=["All", "EVENT", "COMMAND", "HEARTBEAT", "DISCOVERY", "BNC", "EXPERIMENT"],
                 default_value="All",
                 width=120,
                 callback=self._refresh_log_table,
@@ -802,12 +1012,17 @@ class VFMApp:
             self._handle_bnc_edge(which, ts)
         self._refresh_bnc_dots()
 
+        # 1c. Host experiment runner with the same drained CAN frames
+        now = time.time()
+        if self._exp.is_running:
+            self._exp.step(messages, now=now)
+        self._refresh_experiment_status()
+
         # 2. Tick discovery timeout
         if self._discovery:
             self._discovery.tick()
 
         # 3. Staleness check (once per second)
-        now = time.time()
         if now - self._last_stale_check >= STALE_CHECK_INTERVAL:
             self._last_stale_check = now
             if self._registry:
@@ -817,8 +1032,10 @@ class VFMApp:
         # 3b. Base-station dispense scheduler (interval + chained modes)
         self._tick_schedulers(now)
 
-        # 4. Refresh log table if new entries
-        if messages or bnc_events:
+        # 4. Refresh log table when CAN/BNC activity or new experiment log rows
+        log_count = self._log.total_count if self._log else 0
+        if messages or bnc_events or log_count != getattr(self, "_last_log_count", 0):
+            self._last_log_count = log_count
             self._refresh_log_table()
 
     # ------------------------------------------------------------------
@@ -1171,6 +1388,16 @@ class VFMApp:
     # Command helpers
     # ------------------------------------------------------------------
 
+    def _command_details(self, cmd: CanCmd, payload: bytes = b"", ok: bool = True) -> str:
+        """Short human-readable purpose for COMMAND log rows."""
+        purpose = COMMAND_PURPOSE.get(cmd, cmd.name)
+        if cmd == CanCmd.SetConfig and len(payload) >= 3 and payload[0] == CONFIG_HEARTBEAT_INTERVAL:
+            ms = payload[1] | (payload[2] << 8)
+            purpose = f"heartbeat={ms / 1000:g}s"
+        if not ok:
+            return f"{purpose} — send failed"
+        return purpose
+
     def _send_cmd(self, node_id: int, cmd: CanCmd, payload: bytes = b"") -> None:
         if not self._can:
             return
@@ -1187,13 +1414,13 @@ class VFMApp:
                 event_name=cmd.name,
                 raw_id=0x100 + node_id,
                 raw_data=bytes([cmd.value]) + payload,
-                details="" if ok else "send failed",
+                details=self._command_details(cmd, payload, ok),
             ))
 
     def _broadcast(self, cmd: CanCmd, payload: bytes = b"") -> None:
         if not self._can:
             return
-        self._can.send_broadcast(cmd, payload)
+        ok = self._can.send_broadcast(cmd, payload)
         if cmd == CanCmd.Abort and self._registry:
             for node in self._registry.all_nodes():
                 self._registry.clear_fault(node.node_id)
@@ -1207,6 +1434,7 @@ class VFMApp:
                 event_name=f"{cmd.name} (broadcast)",
                 raw_id=0x100,
                 raw_data=bytes([cmd.value]) + payload,
+                details=self._command_details(cmd, payload, ok),
             ))
 
     def _on_apply_heartbeat_interval(self, sender=None, app_data=None, user_data=None) -> None:
@@ -1464,16 +1692,18 @@ class VFMApp:
                 details=f"label={cfg.label or '—'} action={cfg.action or '(none)'}",
             ))
 
+        # Always forward to a running experiment so @exp.on_bnc_in works.
+        if self._exp.is_running:
+            self._exp.forward_bnc(which, ts=ts, high=True)
+
         if cfg.enabled and cfg.action:
             self._dispatch_bnc_action(cfg.action)
 
     def _dispatch_bnc_action(self, action: str) -> None:
-        """
-        Best-effort dispatch for a handful of convenience keywords. Anything
-        else is a free-form placeholder — it was already logged in
-        _handle_bnc_edge, ready to be wired to real behaviour later.
-        """
+        """Dispatch curated BNC IN actions (commands + experiment control)."""
         keyword = action.strip().lower().replace("-", "_")
+        if keyword in ("", "(none)"):
+            return
         if keyword == "dispense_all":
             self._broadcast(CanCmd.Dispense)
         elif keyword == "abort_all":
@@ -1482,7 +1712,10 @@ class VFMApp:
             self._broadcast(CanCmd.Ping)
         elif keyword == "reqstatus_all":
             self._broadcast(CanCmd.ReqStatus)
-        # else: placeholder only — no built-in behaviour yet.
+        elif keyword == "start_experiment":
+            self._on_experiment_start()
+        elif keyword == "stop_experiment":
+            self._on_experiment_stop()
 
     def _maybe_fire_bnc_out(self, event_name: str) -> None:
         """
@@ -1567,6 +1800,8 @@ class VFMApp:
     # ------------------------------------------------------------------
 
     def _shutdown(self) -> None:
+        if self._exp.is_running:
+            self._exp.stop()
         if self._can:
             self._can.stop()
         if self._log:

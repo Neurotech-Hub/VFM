@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from typing import (
+    Any,
     Callable,
     DefaultDict,
     List,
@@ -187,9 +188,12 @@ class Experiment:
         can: Optional[CanManager] = None,
         io: Optional[IOManager] = None,
         log_dir: Optional[str] = None,
+        wire_bnc: bool = True,
     ) -> "ExperimentRunner":
         """Build a runner for GUI hosting or synthetic testing."""
-        return ExperimentRunner(self, can=can, io=io, log_dir=log_dir)
+        return ExperimentRunner(
+            self, can=can, io=io, log_dir=log_dir, wire_bnc=wire_bnc
+        )
 
 
 class ExperimentRunner:
@@ -206,6 +210,7 @@ class ExperimentRunner:
         can: Optional[CanManager] = None,
         io: Optional[IOManager] = None,
         log_dir: Optional[str] = None,
+        wire_bnc: bool = True,
     ) -> None:
         self.experiment = experiment
         self.can = can
@@ -224,7 +229,8 @@ class ExperimentRunner:
         self._owns_can = False
         self._bnc_queue: List[NodeEvent] = []
 
-        if io is not None:
+        # GUI hosts already own BNC edge callbacks; skip double-wiring.
+        if wire_bnc and io is not None:
             self._wire_bnc(io)
 
     # ------------------------------------------------------------------
@@ -284,11 +290,31 @@ class ExperimentRunner:
         self._dispatch_all(list(events), now)
         self._check_end(now)
 
-    def step(self, now: Optional[float] = None) -> None:
-        """
-        One tick: poll CAN, normalize, dispatch, fire timers, check end.
+    def feed_bnc_in(
+        self,
+        channel: int,
+        edge: str,
+        now: Optional[float] = None,
+        high: bool = True,
+    ) -> None:
+        """Queue a BNC_IN event (GUI forwards edges when wire_bnc=False)."""
+        ts = now if now is not None else time.time()
+        self._bnc_queue.append(
+            self.normalizer.inject_bnc_in(channel, edge, ts, high=high)
+        )
 
-        Safe to call from a GUI render loop. No-op after the session ends.
+    def step(
+        self,
+        now: Optional[float] = None,
+        messages: Optional[Sequence[Any]] = None,
+    ) -> None:
+        """
+        One tick: normalize CAN frames, dispatch, fire timers, check end.
+
+        When ``messages`` is provided (GUI hosting), those frames are used
+        instead of calling ``can.poll_rx()`` — the host already drained the
+        shared RX queue. Safe to call from a GUI render loop. No-op after
+        the session ends.
         """
         if self._finished:
             return
@@ -300,13 +326,16 @@ class ExperimentRunner:
 
         events: List[NodeEvent] = []
 
-        # Drain BNC queue (edges from IOManager callbacks).
+        # Drain BNC queue (edges from IOManager callbacks or feed_bnc_in).
         if self._bnc_queue:
             events.extend(self._bnc_queue)
             self._bnc_queue = []
 
-        # Poll CAN.
-        if self.can is not None and self.can.is_open:
+        if messages is not None:
+            for msg in messages:
+                events.extend(self.normalizer.frame_to_events(msg, now))
+            events.extend(self.normalizer.check_staleness(now))
+        elif self.can is not None and self.can.is_open:
             for msg in self.can.poll_rx():
                 events.extend(self.normalizer.frame_to_events(msg, now))
             events.extend(self.normalizer.check_staleness(now))
@@ -388,11 +417,13 @@ class ExperimentRunner:
         end_ev = NodeEvent(kind=EventKind.SESSION_END, timestamp=now)
         if was_active:
             self.ctx.set_now(now)
-            self.ctx.log(
-                "session_end",
-                elapsed_s=round(self.ctx.elapsed(), 3),
-                pellets=self.ctx.counter("pellets"),
-            )
+            end_fields = {
+                "elapsed_s": round(self.ctx.elapsed(), 3),
+                "pellets": self.ctx.counter("pellets"),
+            }
+            if self.ctx.stop_reason:
+                end_fields["reason"] = self.ctx.stop_reason
+            self.ctx.log("session_end", **end_fields)
             self._fire_handlers(end_ev)
             for cb in self.experiment._on_end:
                 self._safe_call_start(cb)
@@ -415,6 +446,8 @@ class ExperimentRunner:
             return
 
         for ev in events:
+            if self.ctx.stop_requested:
+                break
             # Auto-count pellets presented for end_after(pellets=...).
             if ev.kind == EventKind.PELLET_PRESENTED:
                 self.ctx.incr("pellets")
@@ -440,6 +473,9 @@ class ExperimentRunner:
 
     def _check_end(self, now: float) -> None:
         if not self._active or self._finished:
+            return
+        if self.ctx.stop_requested:
+            self._deactivate(now)
             return
         exp = self.experiment
         if exp._end_after_s is not None and self.ctx.elapsed() >= exp._end_after_s:

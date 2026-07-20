@@ -108,7 +108,8 @@ void setup() {
     if (!gVfm.begin()) {
         Serial.println(F("WARNING: one or more services failed to initialise"));
     }
-
+    gVfm.setTouchThreshold(50000);
+    
     // Print MAC UUID
     const uint8_t *m = gVfm.identity().mac();
     Serial.printf("MAC UUID: %02X:%02X:%02X:%02X:%02X:%02X\n",

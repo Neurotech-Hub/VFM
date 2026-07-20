@@ -85,8 +85,13 @@ class ExperimentContext:
         self._log_path: Optional[Path] = None
         self._session_name = session_name
         self._log_dir = log_dir
+        # Optional sink so a GUI host can mirror experiment log rows.
+        self.on_log: Optional[Callable[[ExperimentLogEntry], None]] = None
         # Commands issued during the session (for tests / inspection).
         self.commands_sent: List[tuple] = []
+        # Set by stop(); the runner ends the session on the next end-check.
+        self._stop_requested: bool = False
+        self._stop_reason: str = ""
 
     # ------------------------------------------------------------------
     # Lifecycle (called by runner)
@@ -110,6 +115,28 @@ class ExperimentContext:
     def end(self) -> None:
         """Close the experiment CSV."""
         self._close_csv()
+
+    def stop(self, reason: str = "stopped") -> None:
+        """
+        Request that the runner end the session as soon as possible.
+
+        Cancels pending timers immediately so reload/dispense callbacks
+        cannot fire after a fault or other stop condition.
+        """
+        if self._stop_requested:
+            return
+        self._stop_requested = True
+        self._stop_reason = str(reason)
+        self.cancel_all_timers()
+        self.log("stop_requested", reason=self._stop_reason)
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_requested
+
+    @property
+    def stop_reason(self) -> str:
+        return self._stop_reason
 
     # ------------------------------------------------------------------
     # Actions
@@ -162,8 +189,16 @@ class ExperimentContext:
     def cancel_timer(self, timer: _Timer) -> None:
         timer.cancelled = True
 
+    def cancel_all_timers(self) -> None:
+        """Cancel every pending one-shot / repeating timer."""
+        for timer in self._timers:
+            timer.cancelled = True
+        self._timers = []
+
     def tick_timers(self, now: float) -> None:
         """Fire due timers. Called by the runner each step."""
+        if self._stop_requested:
+            return
         self._now = now
         due = [t for t in self._timers if not t.cancelled and t.fire_at <= now]
         for timer in due:
@@ -227,6 +262,11 @@ class ExperimentContext:
             )
             if self._csv_file is not None:
                 self._csv_file.flush()
+        if self.on_log is not None:
+            try:
+                self.on_log(entry)
+            except Exception:  # noqa: BLE001 — GUI sink must not break callbacks
+                pass
 
     @property
     def log_entries(self) -> List[ExperimentLogEntry]:

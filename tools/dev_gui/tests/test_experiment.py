@@ -279,24 +279,67 @@ def test_free_feeding_immediate_reload_when_delay_zero() -> None:
     assert dispenses == [(2, CanCmd.Dispense)]
 
 
-def test_free_feeding_fault_sends_abort() -> None:
-    exp = build_free_feeding(nodes=[1], reload_delay_s=2.0, seconds=60)
+def test_free_feeding_fault_stops_session() -> None:
+    """Jam/timeout must abort nodes and end the run — no further reloads."""
+    exp = build_free_feeding(nodes=[1, 2], reload_delay_s=2.0, seconds=60)
     runner = exp.make_runner()
     runner.start(now=0.0)
     runner.ctx.commands_sent.clear()
+
+    # Schedule a pending reload on node 2, then fault on node 1.
+    runner.inject(NodeEvent(EventKind.DOME_CLOSED, node_id=2, timestamp=1.0))
+    assert not runner.is_finished
+
+    runner.inject(
+        NodeEvent(
+            EventKind.FAULT,
+            node_id=1,
+            timestamp=2.0,
+            data={"fault_code": ServiceStatus.Timeout},
+        )
+    )
+    assert runner.is_finished
+    assert runner.ctx.stop_requested
+    assert "fault" in runner.ctx.stop_reason
+
+    aborts = [
+        (n, cmd) for (n, cmd, _) in runner.ctx.commands_sent if cmd == CanCmd.Abort
+    ]
+    # Broadcast Abort (node_id 0) so every node stops.
+    assert (0, CanCmd.Abort) in aborts
+
+    # Pending reload must not fire after the fault.
+    runner.ctx.commands_sent.clear()
+    runner.step(now=5.0)
+    dispenses = [
+        (n, cmd) for (n, cmd, _) in runner.ctx.commands_sent if cmd == CanCmd.Dispense
+    ]
+    assert dispenses == []
+
+
+def test_free_feeding_fault_no_reload_after_dome() -> None:
+    """Dome-close after a fault must not restart dispensing."""
+    exp = build_free_feeding(nodes=[1], reload_delay_s=0.0, seconds=60)
+    runner = exp.make_runner()
+    runner.start(now=0.0)
 
     runner.inject(
         NodeEvent(
             EventKind.FAULT,
             node_id=1,
             timestamp=1.0,
-            data={"fault_code": ServiceStatus.Timeout},
+            data={"fault_code": ServiceStatus.Jam},
         )
     )
-    aborts = [
-        (n, cmd) for (n, cmd, _) in runner.ctx.commands_sent if cmd == CanCmd.Abort
+    assert runner.is_finished
+    runner.ctx.commands_sent.clear()
+
+    runner.inject(NodeEvent(EventKind.DOME_CLOSED, node_id=1, timestamp=2.0))
+    runner.step(now=3.0)
+    dispenses = [
+        (n, cmd) for (n, cmd, _) in runner.ctx.commands_sent if cmd == CanCmd.Dispense
     ]
-    assert aborts == [(1, CanCmd.Abort)]
+    assert dispenses == []
 
 
 def test_free_feeding_ends_on_pellet_cap() -> None:
@@ -309,3 +352,73 @@ def test_free_feeding_ends_on_pellet_cap() -> None:
     runner.inject(NodeEvent(EventKind.PELLET_PRESENTED, node_id=1, timestamp=2.0))
     assert runner.is_finished
     assert runner.ctx.counter("pellets") == 2
+
+
+# ---------------------------------------------------------------------------
+# GUI hosting: ExperimentController + step(messages=...) + on_log
+# ---------------------------------------------------------------------------
+
+def test_runner_step_with_messages_no_can_poll() -> None:
+    """GUI hosting passes drained frames; runner must not require can.poll_rx()."""
+    exp = build_free_feeding(nodes=[1], reload_delay_s=0.0, max_pellets=1)
+    runner = exp.make_runner(wire_bnc=False)
+    runner.start(now=0.0)
+    runner.ctx.commands_sent.clear()
+
+    arb, data = build_event_frame(1, CanEvent.PelletPresented, b"\x01\x00")
+    msg = _msg(arb, data)
+    runner.step(now=1.0, messages=[msg])
+    assert runner.ctx.counter("pellets") == 1
+    assert runner.is_finished
+
+
+def test_wire_bnc_false_skips_io_callbacks() -> None:
+    class FakeIO:
+        def __init__(self):
+            self.in1 = []
+            self.in2 = []
+
+        def on_bnc_in1_edge(self, cb):
+            self.in1.append(cb)
+
+        def on_bnc_in2_edge(self, cb):
+            self.in2.append(cb)
+
+    io = FakeIO()
+    exp = build_free_feeding(nodes=[1], seconds=1)
+    runner = exp.make_runner(io=io, wire_bnc=False)
+    assert io.in1 == []
+    assert io.in2 == []
+    # Default wire_bnc=True would register callbacks:
+    runner2 = exp.make_runner(io=FakeIO(), wire_bnc=True)
+    assert len(runner2.io._bnc_in1_cb if hasattr(runner2.io, "_bnc_in1_cb") else []) >= 0
+    # Use a fresh FakeIO to assert registration happened.
+    io2 = FakeIO()
+    exp.make_runner(io=io2, wire_bnc=True)
+    assert len(io2.in1) == 1
+    assert len(io2.in2) == 1
+
+
+def test_controller_step_and_on_log() -> None:
+    from vfm_gui.experiment.gui_controller import ExperimentController
+    from vfm_gui.experiment.schema import load_experiment_def, DEFAULT_EXPERIMENTS_DIR
+    from vfm_gui.log_manager import LogManager
+
+    ff = load_experiment_def(DEFAULT_EXPERIMENTS_DIR / "free_feeding.json")
+    log = LogManager(auto_save=False)
+    ctrl = ExperimentController()
+    assert ctrl.start(
+        ff,
+        params={"reload_delay_s": 0, "minutes": 0, "max_pellets": 1},
+        nodes=[1],
+        log=log,
+    )
+    assert ctrl.is_running
+
+    arb, data = build_event_frame(1, CanEvent.PelletPresented, b"\x01\x00")
+    ctrl.step(messages=[_msg(arb, data)], now=1.0)
+    assert not ctrl.is_running  # finished via pellet cap
+
+    exp_rows = [e for e in log.all_entries() if e.frame_type == "EXPERIMENT"]
+    assert any(e.event_name == "session_start" for e in exp_rows)
+    assert any(e.event_name == "pellet_presented" for e in exp_rows)

@@ -14,7 +14,7 @@ VFM::VFM()
 
       presence_(false),
 
-      touchThreshold_(40),
+      touchThreshold_(40000),
 
       btnHoldMs_(3000),
 
@@ -523,7 +523,7 @@ void VFM::updateTouch() {
 
     uint32_t val = touchRead(PIN_TOUCH);
 
-    presence_ = (val < touchThreshold_);
+    presence_ = (val > touchThreshold_);
 
 }
 

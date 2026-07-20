@@ -29,11 +29,11 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from vfm_gui.experiment import Experiment  # noqa: E402
-from vfm_gui.experiment.templates import free_feeding as free_feeding_mod  # noqa: E402
+from vfm_gui.experiment.templates import free_feeding  # noqa: E402
 
 
 BUILTIN_TEMPLATES = {
-    "free_feeding": free_feeding_mod.build,
+    "free_feeding": free_feeding,  # factory: build(**kwargs) -> Experiment
 }
 
 

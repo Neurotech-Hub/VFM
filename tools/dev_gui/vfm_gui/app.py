@@ -562,7 +562,7 @@ class VFMApp:
             with dpg.group(horizontal=True):
                 tags["label_input"] = dpg.add_input_text(
                     default_value=f"Node {node_id}",
-                    width=TILE_W - 90,
+                    width=120,
                     on_enter=True,
                     user_data=node_id,
                     callback=lambda s, a, u: self._on_label_change(u, a),

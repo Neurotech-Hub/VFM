@@ -24,6 +24,7 @@ DispenserService::DispenserService()
       raiseStartMs_(0),
       pg3OpenSinceMs_(0),
       domeWarnLatched_(false),
+      pelletDropLatched_(false),
       motorSpeed_(kDefaultMotorSpeed),
       lowerSteps_(kDefaultLowerSteps),
       raiseSteps_(kDefaultRaiseSteps),
@@ -112,13 +113,18 @@ void DispenserService::update() {
                 faultNow(ServiceStatus::Timeout);
                 break;
             }
-            if (pg1State_) {
-                haltMotors();
-                setEvent(DispenseEvent::PelletLoaded);
+            if (!pelletDropLatched_) {
+                if (pg1State_) {
+                    // Drop detected — stop M1; wait for PG1 clear before raise
+                    haltMotors();
+                    setEvent(DispenseEvent::PelletLoaded);
+                    pelletDropLatched_ = true;
+                } else {
+                    motor1_.runSpeed();
+                }
+            } else if (!pg1State_) {
                 startRaise();
                 setState(DispenseState::Raising);
-            } else {
-                motor1_.runSpeed();
             }
             break;
 
@@ -170,6 +176,7 @@ bool DispenserService::dispense() {
 void DispenserService::abort() {
     haltMotors();
     lastFault_ = ServiceStatus::Ok;
+    pelletDropLatched_ = false;
     setState(DispenseState::Idle);
 }
 
@@ -210,6 +217,7 @@ void DispenserService::startFeed() {
     motor1_.enableOutputs();
     motor1_.setCurrentPosition(0);
     motionStartMs_ = millis();
+    pelletDropLatched_ = false;
     motor1_.setSpeed(motorSpeed_);
 }
 
@@ -257,7 +265,7 @@ void DispenserService::updatePhotogates() {
 }
 
 void DispenserService::checkPg1Jam() {
-    // Drop detector should be a brief pulse; held >1 s ⇒ pellet jam
+    // Drop detector should clear after the pellet falls; held ≥3 s ⇒ jam
     if (!pg1State_ || pg1OnSinceMs_ == 0) return;
     if ((millis() - pg1OnSinceMs_) >= kPg1JamMs) {
         faultNow(ServiceStatus::Jam);

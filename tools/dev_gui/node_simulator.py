@@ -379,44 +379,49 @@ class NodeSimulator:
             node.dispense_step      = 1
             node.dispense_step_time = now
 
-        # Step 1 → 2: PG1 pellet seated → Loaded then Raising
+        # Step 1 → 1b: PG1 drop → Loaded; wait clear before raise
         elif node.dispense_step == 1 and elapsed >= 0.5:
             node.pg1 = True
             self._send_input_changed(node, InputId.PG1, True)
             self._send_event(node, CanEvent.PelletLoaded)  # "Loaded"
-            node.dispense_state = DispenseState.Raising
-            self._send_event(node, CanEvent.Raising)
             node.dispense_step      = 2
             node.dispense_step_time = now
 
-        # Step 2 → 3: PelletPresented after raise travel
-        elif node.dispense_step == 2 and elapsed >= self.PRESENTED_DELAY:
+        # Step 1b → 2: PG1 clear → Raising
+        elif node.dispense_step == 2 and elapsed >= 0.2:
+            node.pg1 = False
+            self._send_input_changed(node, InputId.PG1, False)
+            node.dispense_state = DispenseState.Raising
+            self._send_event(node, CanEvent.Raising)
+            node.dispense_step      = 3
+            node.dispense_step_time = now
+
+        # Step 3 → Presented after raise travel
+        elif node.dispense_step == 3 and elapsed >= self.PRESENTED_DELAY:
             node.dispense_state = DispenseState.Presented
             self._send_event(node, CanEvent.PelletPresented)
             taken_delay = random.uniform(self.TAKEN_DELAY_MIN, self.TAKEN_DELAY_MAX)
             node._taken_delay = taken_delay
-            node.dispense_step      = 3
+            node.dispense_step      = 4
             node.dispense_step_time = now
 
-        # Step 3 → AccessAttempt after random delay; stay Presented (B2)
-        elif node.dispense_step == 3 and elapsed >= getattr(node, "_taken_delay", self.TAKEN_DELAY_MAX):
+        # Step 4 → AccessAttempt after random delay; stay Presented (B2)
+        elif node.dispense_step == 4 and elapsed >= getattr(node, "_taken_delay", self.TAKEN_DELAY_MAX):
             node.pg3 = True
             node.pg3_open_since = now
             node.dome_warn_sent = False
             self._send_input_changed(node, InputId.PG3, True)
-            # Stay in Presented — AccessAttempt is not a confirmed take
             self._send_event(node, CanEvent.AccessAttempt)
-            node.dispense_step = 4
+            node.dispense_step = 5
             node.dispense_step_time = now
 
-        # Step 4: keep PG3 open long enough that DomeOpenWarning can fire in demos;
-        # clear after max(DOME_WARN_DELAY+0.5, 0.5) then remain Presented
-        elif node.dispense_step == 4 and elapsed >= self.DOME_WARN_DELAY + 0.5:
+        # Step 5: hold PG3 open for DomeOpenWarning demos, then clear; stay Presented
+        elif node.dispense_step == 5 and elapsed >= self.DOME_WARN_DELAY + 0.5:
             self._send_input_changed(node, InputId.PG3, False)
             node.pg3 = False
             node.pg3_open_since = None
             node.dome_warn_sent = False
-            node.dispense_step = 5  # waiting for Abort / next Dispense
+            node.dispense_step = 6  # waiting for Abort / next Dispense
             print(f"  [SIM] Node {node.node_id}: AccessAttempt (still Presented)", flush=True)
 
     def _check_dome_open_warning(self, node: SimNode, now: float) -> None:

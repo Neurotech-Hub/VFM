@@ -21,7 +21,7 @@ enum class ServiceStatus : uint8_t {
 enum class DispenseState : uint8_t {
     Idle = 0,
     Lowering    = 1, // M2 down until PG2 triggers (home / load position)
-    Feeding     = 2, // M1 feeding pellet until PG1 triggers
+    Feeding     = 2, // M1 feed until PG1; wait PG1 clear before raise
     Raising     = 3, // M2 up by raiseSteps_ from home
     Presented   = 4, // Pellet at top; waits until Abort or next Dispense
     SeekingAway = 5, // M2 up until PG2 clears (was Taken; wire value reused)
@@ -34,7 +34,7 @@ enum class DispenseState : uint8_t {
 // ---------------------------------------------------------------------------
 enum class DispenseEvent : uint8_t {
     None = 0,
-    PelletLoaded,     // PG1 fired: pellet seated in actuator cup
+    PelletLoaded,     // PG1 drop seen; raise starts after PG1 clears
     PelletPresented,  // Actuator reached top (also increments pelletCount)
     AccessAttempt,    // PG3 dome open — not a confirmed take
     Fault,            // Timeout or Jam (see DispenserService::faultCode())

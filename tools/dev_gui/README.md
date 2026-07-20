@@ -79,6 +79,80 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
+## Experiment engine (headless task/session API)
+
+The GUI is for live monitoring and discovery. Behavioral tasks live in a
+separate **event-driven experiment engine** under
+[`vfm_gui/experiment/`](vfm_gui/experiment/). Nodes stay dumb (commands in,
+events out); your script decides what to do next.
+
+### Quick start — free feeding against the simulator
+
+```bash
+# Terminal 1 — fake nodes (Linux / Pi; needs vcan0 — see above)
+python node_simulator.py --interface vcan0 --nodes 3 --skip-discovery
+
+# Terminal 2 — run the built-in free-feeding template for 60 s
+python run_experiment.py free_feeding --interface vcan0 --nodes 1,2,3 \
+    --seconds 60 --reload-delay 2 --no-io --log-dir ~/vfm_logs
+```
+
+On a non-Pi host use `--no-io` so GPIO/BNC setup is skipped.
+
+### Write your own experiment
+
+```python
+from vfm_gui.experiment import Experiment, EventKind
+
+exp = Experiment(nodes=[1, 2, 3], name="my_task")
+
+@exp.on_start
+def start(ctx):
+    for n in ctx.nodes:
+        ctx.dispense(n)
+
+@exp.on_access_attempt
+def attempted(ctx, ev):
+    ctx.log("retrieval_attempt", node=ev.node_id)
+
+@exp.on_dome_closed
+def reload(ctx, ev):
+    ctx.after(2.0, lambda: ctx.dispense(ev.node_id))
+
+exp.end_after(hours=12)
+# exp.run(interface="vcan0")   # or: save as my_task.py and use the CLI
+```
+
+```bash
+python run_experiment.py my_task.py --interface vcan0 --no-io
+```
+
+A script may expose either `exp = Experiment(...)` or
+`def build(**kwargs) -> Experiment`.
+
+### Built-in templates
+
+| Name | Module | Behavior |
+|------|--------|----------|
+| `free_feeding` | `vfm_gui.experiment.templates.free_feeding` | Dispense on all nodes at start; on dome close, wait `reload_delay` and re-dispense; end on duration and/or pellet cap |
+
+### API surface
+
+- **Events** (`EventKind`): `PELLET_LOADED`, `PELLET_PRESENTED`, `ACCESS_ATTEMPT`,
+  `FAULT`, phase events, `PRESENCE_CHANGED`, `PG_CHANGED`, plus derived
+  `DOME_OPENED` / `DOME_CLOSED`, `NODE_ONLINE` / `NODE_OFFLINE`, and
+  base-station `BNC_IN`, `SESSION_START`, `SESSION_END`.
+- **Context actions**: `dispense`, `abort`, `broadcast_dispense`,
+  `bnc_pulse`, `set_heartbeat_interval`, `after` / `every` timers,
+  named `counter` / `incr`, `log`.
+- **Lifecycle**: `start_when(condition)`, `end_after(hours=…, pellets=…)`,
+  `end_when(condition)`.
+- **Hosting**: `exp.run(interface=…)` (blocking) or
+  `runner = exp.make_runner(…); runner.step(now)` for GUI integration later.
+
+Experiment-level CSV logs go to `--log-dir` as
+`experiment_<name>_YYYYMMDD_HHMMSS.csv` (separate from the raw-CAN session log).
+
 ## Base station I/O (BNC, AEO, button)
 
 The main screen includes a **BNC / Sync I/O** panel between the node grid and
@@ -105,7 +179,8 @@ to a harmless simulation mode automatically when no GPIO backend
 ```
 tools/dev_gui/
 ├── requirements.txt
-├── run.py                    # Entry point
+├── run.py                    # GUI entry point
+├── run_experiment.py         # Headless experiment CLI
 ├── node_simulator.py         # Fake VFM nodes for vcan0 testing
 ├── deploy/                   # One-time Pi setup: MCP2515 device tree overlay,
 │                              # systemd-networkd unit — see deploy/README.md
@@ -120,7 +195,13 @@ tools/dev_gui/
     ├── mac_id_registry.py    # Persistent MAC ↔ Node ID dictionary (~/.vfm/…)
     ├── node_registry.py      # Per-node live state (session)
     ├── log_manager.py        # Ring buffer + CSV auto-save
-    └── app.py                # DearPyGui screens + render loop
+    ├── app.py                # DearPyGui screens + render loop
+    └── experiment/           # Headless event-driven task engine
+        ├── events.py         # EventKind + CAN → NodeEvent normalizer
+        ├── context.py        # Actions, timers, counters, experiment CSV
+        ├── runner.py         # Experiment API + tick loop
+        └── templates/
+            └── free_feeding.py
 ```
 
 ## Persistent MAC ↔ Node ID map

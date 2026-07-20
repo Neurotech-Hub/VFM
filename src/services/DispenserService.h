@@ -22,7 +22,7 @@ constexpr uint32_t kPGDebounceMs           = 20;
 // After a PG3 trigger edge, suppress further PG3 event-log edges for this long.
 constexpr uint32_t kPg3EventBlankMs        = 3000;
 // Jam / warning timers
-constexpr uint32_t kPg1JamMs               = 1000;   // PG1 held → Jam
+constexpr uint32_t kPg1JamMs               = 3000;   // PG1 held after drop → Jam
 constexpr uint32_t kPg2ClearOnRaiseMs      = 5000;   // PG2 must clear after raise start
 constexpr uint32_t kDomeOpenWarnMs         = 30000;  // PG3 open → DomeOpenWarning
 
@@ -104,6 +104,7 @@ private:
     uint32_t raiseStartMs_;     // when Raising began (for PG2 clear check)
     uint32_t pg3OpenSinceMs_;   // when PG3 became true; 0 = currently closed
     bool     domeWarnLatched_;  // one-shot DomeOpenWarning per open bout
+    bool     pelletDropLatched_; // Feeding: PG1 seen; wait clear before raise
 
     // Tuning
     float    motorSpeed_;

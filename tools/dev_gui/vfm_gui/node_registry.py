@@ -156,7 +156,7 @@ class NodeRegistry:
         state_map = {
             CanEvent.Lowering:        DispenseState.Lowering,
             CanEvent.Loading:         DispenseState.Loading,
-            CanEvent.PelletLoaded:    DispenseState.Raising,
+            CanEvent.PelletLoaded:    DispenseState.Loading,
             CanEvent.Raising:         DispenseState.Raising,
             CanEvent.PelletPresented: DispenseState.Presented,
             CanEvent.AccessAttempt:   DispenseState.AccessAttempt,

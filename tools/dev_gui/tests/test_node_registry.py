@@ -92,7 +92,7 @@ class TestNodeRegistry:
         seq = [
             (CanEvent.Lowering, DispenseState.Lowering, "LOWERING"),
             (CanEvent.Loading, DispenseState.Loading, "LOADING"),
-            (CanEvent.PelletLoaded, DispenseState.Raising, "RAISING"),
+            (CanEvent.PelletLoaded, DispenseState.Loading, "LOADING"),
             (CanEvent.Raising, DispenseState.Raising, "RAISING"),
             (CanEvent.AccessAttempt, DispenseState.AccessAttempt, "ACCESSATTEMPT"),
         ]

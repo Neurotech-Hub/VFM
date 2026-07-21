@@ -1,4 +1,4 @@
-"""Tests for vfm_gui.mac_id_registry."""
+"""Tests for sfm_gui.mac_id_registry."""
 
 import json
 import os
@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from vfm_gui.mac_id_registry import MacIdRegistry, parse_mac
+from sfm_gui.mac_id_registry import MacIdRegistry, parse_mac
 
 
 MAC_A = bytes.fromhex("AABBCCDDEE01")

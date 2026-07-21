@@ -15,9 +15,9 @@ Each simulated node:
   - Sends heartbeats at 1 Hz
   - Responds to Ping with Pong
   - On Dispense: simulates the full event sequence with realistic timing
-    Lowering → Loading → Loaded → Raising → PelletPresented → AccessAttempt
-    (stays Presented until Abort / next Dispense)
-  - On Abort: returns to Idle immediately
+    Lowering → Loading → Loaded → Raising → PelletPresented → CatchAttempt
+    (stays Presented until Recover / next Dispense)
+  - On Recover: returns to Idle immediately
 
 Press Ctrl+C to stop.
 
@@ -44,10 +44,10 @@ except ImportError:
     print("python-can is required: pip install python-can", file=sys.stderr)
     sys.exit(1)
 
-# Import protocol helpers from the vfm_gui package if available,
+# Import protocol helpers from the sfm_gui package if available,
 # otherwise define the bare minimum here so the simulator is standalone.
 try:
-    from vfm_gui.protocol import (
+    from sfm_gui.protocol import (
         CanCmd,
         CanEvent,
         DispenseState,
@@ -72,10 +72,10 @@ except ImportError:
     from enum import IntEnum
 
     class CanCmd(IntEnum):
-        Ping=0x01; Dispense=0x02; Abort=0x03; AssignId=0x04; SetConfig=0x05; ReqStatus=0x06; ClearId=0x07
+        Ping=0x01; Dispense=0x02; Recover=0x03; AssignId=0x04; SetConfig=0x05; ReqStatus=0x06; ClearId=0x07
 
     class CanEvent(IntEnum):
-        PelletLoaded=0x01; PelletPresented=0x02; AccessAttempt=0x03; Fault=0x04
+        PelletLoaded=0x01; PelletPresented=0x02; CatchAttempt=0x03; Fault=0x04
         Pong=0x05; InputChanged=0x06; Lowering=0x07; Loading=0x08; Raising=0x09
         DomeOpenWarning=0x0A
 
@@ -83,7 +83,7 @@ except ImportError:
         PG1=0x01; PG2=0x02; PG3=0x03; Presence=0x04
 
     class DispenseState(IntEnum):
-        Idle=0; Lowering=1; Loading=2; Raising=3; Presented=4; SeekingAway=5; Fault=6; AccessAttempt=7
+        Idle=0; Lowering=1; Loading=2; Raising=3; Presented=4; SeekingAway=5; Fault=6; CatchAttempt=7
 
     class ServiceStatus(IntEnum):
         Ok=0; NotInitialized=1; Timeout=2; Jam=3; InvalidData=4
@@ -325,14 +325,14 @@ class NodeSimulator:
                     self._send_event(node, CanEvent.Lowering)
                     print(f"  [SIM] Node {node.node_id}: Dispense started (Lowering)", flush=True)
 
-            elif cmd == CanCmd.Abort:
+            elif cmd == CanCmd.Recover:
                 node.dispense_state = DispenseState.Idle
                 node.phase          = SimNodePhase.Enabled
                 node.fault_code     = ServiceStatus.Ok
                 node.pg1 = node.pg2 = node.pg3 = False
                 node.pg3_open_since = None
                 node.dome_warn_sent = False
-                print(f"  [SIM] Node {node.node_id}: Aborted", flush=True)
+                print(f"  [SIM] Node {node.node_id}: Recovered", flush=True)
 
             elif cmd == CanCmd.ReqStatus:
                 self._send_heartbeat(node)
@@ -405,13 +405,13 @@ class NodeSimulator:
             node.dispense_step      = 4
             node.dispense_step_time = now
 
-        # Step 4 → AccessAttempt after random delay; stay Presented (B2)
+        # Step 4 → CatchAttempt after random delay; stay Presented (B2)
         elif node.dispense_step == 4 and elapsed >= getattr(node, "_taken_delay", self.TAKEN_DELAY_MAX):
             node.pg3 = True
             node.pg3_open_since = now
             node.dome_warn_sent = False
             self._send_input_changed(node, InputId.PG3, True)
-            self._send_event(node, CanEvent.AccessAttempt)
+            self._send_event(node, CanEvent.CatchAttempt)
             node.dispense_step = 5
             node.dispense_step_time = now
 
@@ -421,8 +421,8 @@ class NodeSimulator:
             node.pg3 = False
             node.pg3_open_since = None
             node.dome_warn_sent = False
-            node.dispense_step = 6  # waiting for Abort / next Dispense
-            print(f"  [SIM] Node {node.node_id}: AccessAttempt (still Presented)", flush=True)
+            node.dispense_step = 6  # waiting for Recover / next Dispense
+            print(f"  [SIM] Node {node.node_id}: CatchAttempt (still Presented)", flush=True)
 
     def _check_dome_open_warning(self, node: SimNode, now: float) -> None:
         """Emit one-shot DomeOpenWarning after continuous PG3 open (sim delay)."""

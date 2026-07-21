@@ -2,7 +2,7 @@
 
 import time
 
-from vfm_gui.app import ScheduleConfig
+from sfm_gui.app import ScheduleConfig
 
 
 def test_countdown_interval_formats_minutes_and_seconds() -> None:

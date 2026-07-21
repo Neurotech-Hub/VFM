@@ -1,5 +1,5 @@
 """
-app.py — VFM Developer GUI main application.
+app.py — SFM Developer GUI main application.
 
 Two screens:
   1. Setup  — configure CAN interface, node count, mode, logging.
@@ -21,7 +21,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import dearpygui.dearpygui as dpg
 
@@ -32,7 +32,12 @@ from .log_manager import LogEntry, LogManager
 from .mac_id_registry import DEFAULT_REGISTRY_PATH, MacIdRegistry
 from .node_registry import NodeRegistry
 from .experiment import ExperimentController, load_experiment_defs
-from .experiment.schema import DEFAULT_EXPERIMENTS_DIR, ExperimentDef
+from .experiment.schema import (
+    DEFAULT_EXPERIMENTS_DIR,
+    ExperimentDef,
+    ExperimentParam,
+    param_visible,
+)
 from .protocol import (
     CanCmd,
     CanEvent,
@@ -61,8 +66,8 @@ from .protocol import (
 
 WINDOW_W = 1280
 WINDOW_H = 960        
-TILE_W   = 380
-TILE_H   = 358
+TILE_W   = 320
+TILE_H   = 320
 LOG_ROWS = 18        # visible rows in the log table before scroll
 LOG_TABLE_HEIGHT = 220  
 STALE_CHECK_INTERVAL = 1.0  # seconds between staleness sweeps
@@ -73,7 +78,7 @@ MAC_PING_RETRY_S = 3.0  # min seconds between MAC-resolution Pings to the same n
 COMMAND_PURPOSE = {
     CanCmd.Ping: "identify / request MAC",
     CanCmd.Dispense: "load & present pellet",
-    CanCmd.Abort: "stop motion & clear fault",
+    CanCmd.Recover: "stop motion & clear fault",
     CanCmd.AssignId: "set node ID",
     CanCmd.SetConfig: "set config",
     CanCmd.ReqStatus: "request heartbeat now",
@@ -83,7 +88,7 @@ COMMAND_PURPOSE = {
 BNC_IN_ACTIONS = [
     "(none)",
     "dispense_all",
-    "abort_all",
+    "recover_all",
     "ping_all",
     "reqstatus_all",
     "start_experiment",
@@ -91,13 +96,15 @@ BNC_IN_ACTIONS = [
 ]
 
 def _bnc_out_trigger_items() -> list:
-    names = sorted({v for v in CAN_EVENT_DISPLAY_NAME.values()})
-    # Include raw event names not in the display map (e.g. Fault, AccessAttempt).
+    display_names_set = set(CAN_EVENT_DISPLAY_NAME.values())
+    # Start with display names
+    names = sorted(display_names_set)
+    # Add raw event names not already in display map (exclude Pong, InputChanged, CatchAttempt)
     for ev in CanEvent:
-        if ev.name not in ("Pong", "InputChanged") and ev.name not in names:
+        if ev.name not in ("Pong", "InputChanged", "CatchAttempt") and ev.name.lower() not in {n.lower() for n in names}:
             names.append(ev.name)
     names = sorted(set(names))
-    return ["any_event", "fault"] + names
+    return ["any_event"] + names
 
 # Status dot color tags (registered once at startup)
 _COLOR_GREEN  = (60,  200, 80,  255)
@@ -178,7 +185,7 @@ class ScheduleConfig:
 # Application
 # ---------------------------------------------------------------------------
 
-class VFMApp:
+class SFMApp:
     """Top-level application controller."""
 
     def __init__(self, args: argparse.Namespace) -> None:
@@ -197,8 +204,8 @@ class VFMApp:
 
         # BNC configuration — deliberately free-form placeholders; see
         # io_manager.BNCInputConfig / BNCOutputConfig docstrings.
-        self._bnc_in1_cfg = BNCInputConfig(label="BNC IN 1")
-        self._bnc_in2_cfg = BNCInputConfig(label="BNC IN 2")
+        self._bnc_in1_cfg = BNCInputConfig(label="BNC IN 0")
+        self._bnc_in2_cfg = BNCInputConfig(label="BNC IN 1")
         self._bnc_out_cfg = BNCOutputConfig(label="BNC OUT")
         self._bnc_tiles: Dict[str, dict] = {}
         self._bnc_edge_queue: "queue.Queue[tuple[str, float]]" = queue.Queue(maxsize=256)
@@ -220,8 +227,13 @@ class VFMApp:
         # Experiment panel (JSON schema → Python templates)
         self._exp_defs = load_experiment_defs(DEFAULT_EXPERIMENTS_DIR)
         self._exp = ExperimentController()
-        self._exp_param_tags: Dict[str, int] = {}  # param.key → widget tag
-        self._exp_log_dir = str(Path("~/vfm_logs").expanduser())
+        # Schema-driven experiment param widgets. Rebuilt on template change.
+        self._exp_param_tags: Dict[str, int] = {}          # scalar param.key → widget tag
+        self._exp_node_param_tags: Dict[str, Dict[int, int]] = {}  # node param.key → {node_id: tag}
+        self._exp_param_groups: List[tuple] = []           # [(ExperimentParam, group_tag)]
+        self._exp_input_tags: List[Any] = []               # every input widget (for run-lock)
+        self._exp_inputs_locked: bool = False
+        self._exp_log_dir = str(Path("~/sfm_logs").expanduser())
 
     # ------------------------------------------------------------------
     # Entry point
@@ -233,7 +245,7 @@ class VFMApp:
         self._setup_fonts()
         self._build_setup_screen()
         dpg.create_viewport(
-            title="VFM Developer GUI",
+            title="SFM Developer GUI",
             width=WINDOW_W,
             height=WINDOW_H,
             resizable=True,
@@ -320,7 +332,7 @@ class VFMApp:
 
         with dpg.window(
             tag="setup_window",
-            label="VFM Developer GUI",
+            label="SFM Developer GUI",
             width=win_w,
             height=win_h,
             pos=((vp_w - win_w) // 2, (vp_h - win_h) // 2),
@@ -330,8 +342,11 @@ class VFMApp:
             no_resize=True,
         ):
             dpg.add_spacer(height=8)
-            dpg.add_text("VFM Developer GUI", color=(100, 180, 255, 255))
-            dpg.add_text("Base Station Control & Monitoring", color=(160, 165, 175, 255))
+            dpg.add_text("SFM Developer GUI", color=(100, 180, 255, 255))
+            dpg.add_text(
+                "Spatial Foraging Module — Base Station Control & Monitoring",
+                color=(160, 165, 175, 255),
+            )
             dpg.add_separator()
             dpg.add_spacer(height=6)
 
@@ -342,16 +357,16 @@ class VFMApp:
                     label="Interface",
                     default_value=self._args.interface,
                     width=160,
-                    on_enter=True,
                     callback=self._on_check_can_status,
+                    on_enter=True,
                 )
                 dpg.add_input_int(
                     tag="setup_bitrate",
                     label="Bitrate (bps)",
                     default_value=self._args.bitrate,
                     width=160,
-                    min_value=10_000,
-                    max_value=1_000_000,
+                    readonly=True,
+                    step=0,
                 )
                 with dpg.group(horizontal=True):
                     dpg.add_text("Driver status:", color=(160, 165, 175, 255))
@@ -444,7 +459,7 @@ class VFMApp:
             dpg.set_value("setup_error", "Interface name cannot be empty.")
             return
 
-        self._exp_log_dir = log_dir or str(Path("~/vfm_logs").expanduser())
+        self._exp_log_dir = log_dir or str(Path("~/sfm_logs").expanduser())
 
         # Open CAN
         try:
@@ -503,7 +518,7 @@ class VFMApp:
     def _build_main_screen(self, num_nodes: int) -> None:
         with dpg.window(
             tag="main_window",
-            label="VFM Developer GUI — Main",
+            label="SFM Developer GUI — Main",
             width=WINDOW_W,
             height=WINDOW_H,
             pos=(0, 0),
@@ -547,8 +562,8 @@ class VFMApp:
             dpg.add_text("Broadcast:", color=(160, 165, 175, 255))
             dpg.add_button(label="Dispense All",  width=110,
                            callback=lambda: self._broadcast(CanCmd.Dispense))
-            dpg.add_button(label="Abort All",     width=90,
-                           callback=lambda: self._broadcast(CanCmd.Abort))
+            dpg.add_button(label="Recover All",   width=90,
+                           callback=lambda: self._broadcast(CanCmd.Recover))
             dpg.add_button(label="Ping All",      width=80,
                            callback=lambda: self._broadcast(CanCmd.Ping))
             dpg.add_button(label="ReqStatus All", width=110,
@@ -618,9 +633,10 @@ class VFMApp:
 
             # -- Identity --
             dpg.add_separator()
-            with dpg.group():
-                tags["can_id_text"]  = dpg.add_text(f"ID  : {node_id}")
-                tags["mac_text"]     = dpg.add_text("MAC : —")
+            with dpg.group(horizontal=True):
+                tags["can_id_text"]  = dpg.add_text(f"ID: {node_id}")
+                dpg.add_spacer(width=10)
+                tags["mac_text"]     = dpg.add_text("MAC: —")
 
             dpg.add_separator()
 
@@ -653,9 +669,9 @@ class VFMApp:
                     label="Dispense", width=85, user_data=node_id,
                     callback=lambda s, a, u: self._send_cmd(u, CanCmd.Dispense),
                 )
-                dpg.add_button(
-                    label="Abort", width=70, user_data=node_id,
-                    callback=lambda s, a, u: self._send_cmd(u, CanCmd.Abort),
+                tags["recover_btn"] = dpg.add_button(
+                    label="Recover", width=70, user_data=node_id,
+                    callback=lambda s, a, u: self._on_recover_node(u),
                 )
                 dpg.add_button(
                     label="Ping", width=55, user_data=node_id,
@@ -695,21 +711,22 @@ class VFMApp:
     def _build_bnc_panel(self) -> None:
         dpg.add_text("BNC / Sync I/O", color=(100, 180, 255, 255))
         dpg.add_text(
-            "BNC IN Action: broadcast command or start/stop the selected experiment. "
+            "BNC IN: pick an action per edge (rising / falling) — broadcast command "
+            "or start/stop the experiment; leave an edge as (none) to ignore it. "
             "BNC OUT Trigger: pulse on matching CAN event name (or any_event).",
             color=(140, 145, 155, 255), wrap=WINDOW_W - 40,
         )
         with dpg.group(horizontal=True):
-            self._build_bnc_input_box(1, self._bnc_in1_cfg)
+            self._build_bnc_input_box(0, self._bnc_in1_cfg)
             dpg.add_spacer(width=16)
-            self._build_bnc_input_box(2, self._bnc_in2_cfg)
+            self._build_bnc_input_box(1, self._bnc_in2_cfg)
             dpg.add_spacer(width=16)
             self._build_bnc_output_box()
 
     def _build_bnc_input_box(self, idx: int, cfg: BNCInputConfig) -> None:
         key = f"bnc_in{idx}"
         tags: dict = {"last_edge_ts": 0.0}
-        with dpg.child_window(width=300, height=180, border=True):
+        with dpg.child_window(width=335, height=195, border=True):
             with dpg.group(horizontal=True):
                 tags["dot"] = dpg.add_text("●", color=_COLOR_GREY)
                 dpg.add_text(f"BNC IN {idx}")
@@ -719,19 +736,22 @@ class VFMApp:
                 user_data=cfg,
                 callback=lambda s, a, u: setattr(u, "label", a),
             )
+            rising_default = cfg.rising_action if cfg.rising_action in BNC_IN_ACTIONS else "(none)"
             dpg.add_combo(
-                label="Edge", items=["rising", "falling", "both"],
-                default_value=cfg.edge, width=100,
-                user_data=cfg,
-                callback=lambda s, a, u: setattr(u, "edge", a),
-            )
-            default_action = cfg.action if cfg.action in BNC_IN_ACTIONS else "(none)"
-            dpg.add_combo(
-                label="Action", items=BNC_IN_ACTIONS,
-                default_value=default_action, width=180,
+                label="Rising action", items=BNC_IN_ACTIONS,
+                default_value=rising_default, width=180,
                 user_data=cfg,
                 callback=lambda s, a, u: setattr(
-                    u, "action", "" if a == "(none)" else a
+                    u, "rising_action", "" if a == "(none)" else a
+                ),
+            )
+            falling_default = cfg.falling_action if cfg.falling_action in BNC_IN_ACTIONS else "(none)"
+            dpg.add_combo(
+                label="Falling action", items=BNC_IN_ACTIONS,
+                default_value=falling_default, width=180,
+                user_data=cfg,
+                callback=lambda s, a, u: setattr(
+                    u, "falling_action", "" if a == "(none)" else a
                 ),
             )
             dpg.add_checkbox(
@@ -746,8 +766,8 @@ class VFMApp:
         cfg = self._bnc_out_cfg
         tags: dict = {"last_pulse_ts": 0.0}
         triggers = _bnc_out_trigger_items()
-        default_trigger = cfg.trigger if cfg.trigger in triggers else "any_event"
-        with dpg.child_window(width=300, height=180, border=True):
+        default_trigger = cfg.trigger if cfg.trigger in triggers else "Presented"
+        with dpg.child_window(width=300, height=195, border=True):
             with dpg.group(horizontal=True):
                 tags["dot"] = dpg.add_text("●", color=_COLOR_GREY)
                 dpg.add_text("BNC OUT")
@@ -758,10 +778,10 @@ class VFMApp:
                 callback=lambda s, a, u: setattr(u, "label", a),
             )
             dpg.add_input_int(
-                label="Pulse (us)", default_value=cfg.pulse_width_us, width=100,
-                min_value=1, max_value=1_000_000, min_clamped=True, max_clamped=True,
+                label="Pulse (ms)", default_value=max(1, cfg.pulse_width_us // 1000), width=100,
+                min_value=1, max_value=10000, min_clamped=True, max_clamped=True,
                 user_data=cfg,
-                callback=lambda s, a, u: setattr(u, "pulse_width_us", a),
+                callback=lambda s, a, u: setattr(u, "pulse_width_us", a * 1000),
             )
             dpg.add_combo(
                 label="Trigger", items=triggers,
@@ -815,6 +835,10 @@ class VFMApp:
             if self._exp_defs:
                 self._rebuild_experiment_params(self._exp_defs[0])
 
+    def _registry_node_ids(self) -> List[int]:
+        num_nodes = self._registry.num_nodes() if self._registry else 0
+        return list(range(1, num_nodes + 1))
+
     def _selected_experiment_def(self) -> Optional[ExperimentDef]:
         if not self._exp_defs:
             return None
@@ -832,76 +856,205 @@ class VFMApp:
             dpg.set_value("exp_description", exp_def.description)
         self._rebuild_experiment_params(exp_def)
 
+    # ------------------------------------------------------------------
+    # Schema-driven parameter form
+    # ------------------------------------------------------------------
+
     def _rebuild_experiment_params(self, exp_def: ExperimentDef) -> None:
+        """Render every param from the JSON schema — no per-template code."""
         if not dpg.does_item_exist("exp_params_group"):
             return
-        children = dpg.get_item_children("exp_params_group", slot=1) or []
-        for child in children:
+        for child in dpg.get_item_children("exp_params_group", slot=1) or []:
             dpg.delete_item(child)
         self._exp_param_tags = {}
+        self._exp_node_param_tags = {}
+        self._exp_param_groups = []
+        self._exp_input_tags = []
+        if dpg.does_item_exist("exp_template_combo"):
+            self._exp_input_tags.append("exp_template_combo")
+
+        # Keys that gate another param's visibility need a change callback.
+        controllers = set()
+        for p in exp_def.parameters:
+            if p.visible_when:
+                controllers.update(p.visible_when.keys())
 
         for param in exp_def.parameters:
-            tag = f"exp_param_{param.key}"
-            with dpg.group(horizontal=True, parent="exp_params_group"):
+            group_tag = dpg.add_group(parent="exp_params_group")
+            self._exp_param_groups.append((param, group_tag))
+            if param.is_node_param:
+                self._render_node_param(param, group_tag)
+            else:
+                self._render_scalar_param(param, group_tag, notify=param.key in controllers)
+
+        self._apply_param_visibility(exp_def)
+
+    def _render_scalar_param(self, param: ExperimentParam, parent, notify: bool) -> None:
+        tag = f"exp_param_{param.key}"
+        cb = self._on_param_controller_changed if notify else None
+        with dpg.group(horizontal=True, parent=parent):
+            dpg.add_text(f"{param.label}:", color=(160, 165, 175, 255))
+            if param.type == "bool":
+                widget = dpg.add_checkbox(
+                    tag=tag, default_value=bool(param.default), callback=cb,
+                )
+            elif param.type == "int":
+                kwargs = {"tag": tag, "default_value": int(param.default or 0), "width": 120}
+                if param.min is not None:
+                    kwargs["min_value"] = int(param.min); kwargs["min_clamped"] = True
+                if param.max is not None:
+                    kwargs["max_value"] = int(param.max); kwargs["max_clamped"] = True
+                widget = dpg.add_input_int(callback=cb, **kwargs)
+            elif param.type == "float":
+                kwargs = {"tag": tag, "default_value": float(param.default or 0.0),
+                          "width": 120, "format": "%.2f"}
+                if param.min is not None:
+                    kwargs["min_value"] = float(param.min); kwargs["min_clamped"] = True
+                if param.max is not None:
+                    kwargs["max_value"] = float(param.max); kwargs["max_clamped"] = True
+                widget = dpg.add_input_float(callback=cb, **kwargs)
+            elif param.type == "choice":
+                opts = param.options or [str(param.default)]
+                widget = dpg.add_combo(
+                    tag=tag, items=opts, width=160, callback=cb,
+                    default_value=str(param.default if param.default in opts else opts[0]),
+                )
+            else:  # str
+                widget = dpg.add_input_text(
+                    tag=tag, width=160, callback=cb,
+                    default_value="" if param.default is None else str(param.default),
+                )
+            self._exp_param_tags[param.key] = widget
+            self._exp_input_tags.append(widget)
+            if param.help:
+                dpg.add_text(param.help, color=(120, 125, 135, 255))
+
+    def _render_node_param(self, param: ExperimentParam, parent) -> None:
+        """Render one widget per registry node (checkbox / number / dropdown)."""
+        node_ids = self._registry_node_ids()
+        self._exp_node_param_tags[param.key] = {}
+        default_pct = max(0, round(100 / len(node_ids))) if node_ids else 0
+        with dpg.group(parent=parent):
+            with dpg.group(horizontal=True):
                 dpg.add_text(f"{param.label}:", color=(160, 165, 175, 255))
-                if param.type == "bool":
-                    self._exp_param_tags[param.key] = dpg.add_checkbox(
-                        tag=tag,
-                        default_value=bool(param.default),
+                for node_id in node_ids:
+                    if param.type == "nodes":
+                        w = dpg.add_checkbox(label=str(node_id), default_value=True)
+                    elif param.type == "node_number":
+                        lo = int(param.min) if param.min is not None else 0
+                        hi = int(param.max) if param.max is not None else 100
+                        w = dpg.add_input_int(
+                            label=str(node_id), width=55, step=0,
+                            default_value=min(max(default_pct, lo), hi),
+                            min_value=lo, max_value=hi,
+                            min_clamped=True, max_clamped=True,
+                        )
+                    else:  # node_choice
+                        opts = param.options or [str(param.default)]
+                        default = str(param.default if param.default in opts else opts[0])
+                        w = dpg.add_combo(
+                            label=str(node_id), items=opts, default_value=default, width=90,
+                        )
+                    self._exp_node_param_tags[param.key][node_id] = w
+                    self._exp_input_tags.append(w)
+                if param.type == "nodes":
+                    b_all = dpg.add_button(
+                        label="All", width=45,
+                        callback=lambda s, a, u, k=param.key: self._set_all_nodes(k, True),
                     )
-                elif param.type == "int":
-                    kwargs = {
-                        "tag": tag,
-                        "default_value": int(param.default or 0),
-                        "width": 120,
-                    }
-                    if param.min is not None:
-                        kwargs["min_value"] = int(param.min)
-                        kwargs["min_clamped"] = True
-                    if param.max is not None:
-                        kwargs["max_value"] = int(param.max)
-                        kwargs["max_clamped"] = True
-                    self._exp_param_tags[param.key] = dpg.add_input_int(**kwargs)
-                elif param.type == "float":
-                    kwargs = {
-                        "tag": tag,
-                        "default_value": float(param.default or 0.0),
-                        "width": 120,
-                        "format": "%.2f",
-                    }
-                    if param.min is not None:
-                        kwargs["min_value"] = float(param.min)
-                        kwargs["min_clamped"] = True
-                    if param.max is not None:
-                        kwargs["max_value"] = float(param.max)
-                        kwargs["max_clamped"] = True
-                    self._exp_param_tags[param.key] = dpg.add_input_float(**kwargs)
-                elif param.type == "choice":
-                    opts = param.options or [str(param.default)]
-                    self._exp_param_tags[param.key] = dpg.add_combo(
-                        tag=tag,
-                        items=opts,
-                        default_value=str(param.default if param.default in opts else opts[0]),
-                        width=160,
+                    b_none = dpg.add_button(
+                        label="None", width=50,
+                        callback=lambda s, a, u, k=param.key: self._set_all_nodes(k, False),
                     )
-                else:
-                    self._exp_param_tags[param.key] = dpg.add_input_text(
-                        tag=tag,
-                        default_value="" if param.default is None else str(param.default),
-                        width=160,
-                    )
-                if param.help:
-                    dpg.add_text(param.help, color=(120, 125, 135, 255))
+                    self._exp_input_tags += [b_all, b_none]
+            if param.help:
+                dpg.add_text(param.help, color=(120, 125, 135, 255), wrap=WINDOW_W - 60)
+
+    def _set_all_nodes(self, key: str, value: bool) -> None:
+        for tag in self._exp_node_param_tags.get(key, {}).values():
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, value)
+
+    def _on_param_controller_changed(self, sender=None, app_data=None, user_data=None) -> None:
+        exp_def = self._selected_experiment_def()
+        if exp_def is not None:
+            self._apply_param_visibility(exp_def)
+
+    def _controller_values(self, exp_def: ExperimentDef) -> dict:
+        """Current values of scalar params, for evaluating visible_when."""
+        vals = {}
+        for param in exp_def.parameters:
+            if param.is_node_param:
+                continue
+            tag = self._exp_param_tags.get(param.key)
+            vals[param.key] = (
+                dpg.get_value(tag) if tag is not None and dpg.does_item_exist(tag)
+                else param.default
+            )
+        return vals
+
+    def _apply_param_visibility(self, exp_def: ExperimentDef) -> None:
+        vals = self._controller_values(exp_def)
+        for param, group_tag in self._exp_param_groups:
+            if dpg.does_item_exist(group_tag):
+                dpg.configure_item(group_tag, show=param_visible(param, vals))
 
     def _collect_experiment_params(self, exp_def: ExperimentDef) -> dict:
-        values = {}
+        """Read every param back. node_number/node_choice → {node_id: value};
+        the 'nodes' param is skipped (it supplies the nodes= argument)."""
+        vals = self._controller_values(exp_def)
+        values: dict = {}
         for param in exp_def.parameters:
-            tag = self._exp_param_tags.get(param.key)
-            if tag is None or not dpg.does_item_exist(tag):
+            if param.type == "nodes":
+                continue
+            if not param_visible(param, vals):
                 values[param.key] = param.default
+                continue
+            if param.is_node_param:
+                values[param.key] = self._collect_node_param(param)
             else:
-                values[param.key] = dpg.get_value(tag)
+                tag = self._exp_param_tags.get(param.key)
+                values[param.key] = (
+                    dpg.get_value(tag) if tag is not None and dpg.does_item_exist(tag)
+                    else param.default
+                )
         return values
+
+    def _collect_node_param(self, param: ExperimentParam) -> dict:
+        result = {}
+        for node_id, tag in self._exp_node_param_tags.get(param.key, {}).items():
+            if dpg.does_item_exist(tag):
+                result[node_id] = dpg.get_value(tag)
+        return result
+
+    def _effective_nodes(self, exp_def: ExperimentDef) -> List[int]:
+        """The active node set (also the nodes= argument to build_experiment)."""
+        for param in exp_def.parameters:
+            if param.type == "nodes":
+                tags = self._exp_node_param_tags.get(param.key, {})
+                return [n for n, t in tags.items() if dpg.does_item_exist(t) and dpg.get_value(t)]
+        for param in exp_def.parameters:
+            if param.type == "node_number":
+                tags = self._exp_node_param_tags.get(param.key, {})
+                return [n for n, t in tags.items()
+                        if dpg.does_item_exist(t) and (dpg.get_value(t) or 0) > 0]
+        for param in exp_def.parameters:
+            if param.type == "node_choice":
+                inactive = param.options[0] if param.options else "off"
+                tags = self._exp_node_param_tags.get(param.key, {})
+                return [n for n, t in tags.items()
+                        if dpg.does_item_exist(t) and dpg.get_value(t) != inactive]
+        return self._registry_node_ids()
+
+    # ------------------------------------------------------------------
+    # Start / stop (locks the whole config while running)
+    # ------------------------------------------------------------------
+
+    def _set_experiment_inputs_enabled(self, enabled: bool) -> None:
+        self._exp_inputs_locked = not enabled
+        for tag in self._exp_input_tags:
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, enabled=enabled)
 
     def _on_experiment_start(self, sender=None, app_data=None, user_data=None) -> None:
         exp_def = self._selected_experiment_def()
@@ -910,7 +1063,10 @@ class VFMApp:
         if self._exp.is_running:
             return
         params = self._collect_experiment_params(exp_def)
-        nodes = [n.node_id for n in self._registry.all_nodes()]
+        nodes = self._effective_nodes(exp_def)
+        if not nodes:
+            dpg.set_value("exp_status_text", "Enable at least one node to run.")
+            return
         ok = self._exp.start(
             exp_def,
             params=params,
@@ -921,12 +1077,14 @@ class VFMApp:
             log_dir=self._exp_log_dir,
         )
         if ok:
+            self._set_experiment_inputs_enabled(False)  # lock config while running
             dpg.configure_item("exp_start_btn", enabled=False)
             self._refresh_experiment_status()
 
     def _on_experiment_stop(self, sender=None, app_data=None, user_data=None) -> None:
         if self._exp.is_running:
             self._exp.stop()
+        self._set_experiment_inputs_enabled(True)
         if dpg.does_item_exist("exp_start_btn"):
             dpg.configure_item("exp_start_btn", enabled=True)
         self._refresh_experiment_status()
@@ -935,8 +1093,12 @@ class VFMApp:
         if not dpg.does_item_exist("exp_status_text"):
             return
         dpg.set_value("exp_status_text", self._exp.status_line())
+        running = self._exp.is_running
         if dpg.does_item_exist("exp_start_btn"):
-            dpg.configure_item("exp_start_btn", enabled=not self._exp.is_running)
+            dpg.configure_item("exp_start_btn", enabled=not running)
+        # Re-enable the form when a run ends on its own (pellet cap / duration).
+        if not running and self._exp_inputs_locked:
+            self._set_experiment_inputs_enabled(True)
 
     def _build_log_panel(self) -> None:
         dpg.add_text("Event Log", color=(100, 180, 255, 255))
@@ -1104,7 +1266,7 @@ class VFMApp:
                             CanEvent.PelletLoaded,
                             CanEvent.Raising,
                             CanEvent.PelletPresented,
-                            CanEvent.AccessAttempt,
+                            CanEvent.CatchAttempt,
                         ) and len(ev.raw_extra) >= 2:
                             pellet_count = ev.raw_extra[0] | (ev.raw_extra[1] << 8)
                             details = f"pellet_count={pellet_count}"
@@ -1198,6 +1360,7 @@ class VFMApp:
         refresh the persistent MAC↔ID registry so future discovery/REJOIN
         alignment stays accurate too. The RX log entry for this frame
         (added by the caller) already records the confirmed MAC.
+        Mark node as online (primary indicator of connectivity).
         """
         if not self._registry:
             return
@@ -1205,6 +1368,7 @@ class VFMApp:
         if node is None:
             return
         self._mac_ping_sent.pop(node_id, None)
+        node.online = True
         if node.mac == mac:
             return
         self._registry.register_node(node_id, mac, source="PING")
@@ -1368,6 +1532,10 @@ class VFMApp:
     def _on_node_discovered(self, node) -> None:
         if self._registry:
             self._registry.register_node(node.node_id, node.mac, source=node.source)
+            if self._mac_registry:
+                saved_label = self._mac_registry.get_label(node.mac)
+                if saved_label:
+                    self._registry.set_label(node.node_id, saved_label)
         self._refresh_tile(node.node_id)
         if self._log:
             self._log.add(LogEntry(
@@ -1398,11 +1566,24 @@ class VFMApp:
             return f"{purpose} — send failed"
         return purpose
 
+    def _on_recover_node(self, node_id: int) -> None:
+        """
+        Recover a faulted node: clears the fault and readies it for the next
+        action. During an experiment this also re-arms the node's program
+        (via the template's on_recover); otherwise it sends a plain Recover.
+        """
+        if self._exp.is_running and self._exp.recover_node(node_id):
+            if self._registry:
+                self._registry.clear_fault(node_id)
+                self._refresh_tile(node_id)
+            return
+        self._send_cmd(node_id, CanCmd.Recover)
+
     def _send_cmd(self, node_id: int, cmd: CanCmd, payload: bytes = b"") -> None:
         if not self._can:
             return
         ok = self._can.send_command(node_id, cmd, payload)
-        if cmd == CanCmd.Abort and self._registry:
+        if cmd == CanCmd.Recover and self._registry:
             self._registry.clear_fault(node_id)
             self._refresh_tile(node_id)
         if self._log:
@@ -1421,7 +1602,7 @@ class VFMApp:
         if not self._can:
             return
         ok = self._can.send_broadcast(cmd, payload)
-        if cmd == CanCmd.Abort and self._registry:
+        if cmd == CanCmd.Recover and self._registry:
             for node in self._registry.all_nodes():
                 self._registry.clear_fault(node.node_id)
             self._refresh_all_tiles()
@@ -1679,25 +1860,38 @@ class VFMApp:
     def _handle_bnc_edge(self, which: str, ts: float) -> None:
         """Handle a BNC IN1/IN2 edge event drained from the IOManager callback queue."""
         cfg = self._bnc_in1_cfg if which == "IN1" else self._bnc_in2_cfg
+
+        # Classify the edge by reading the current (de-inverted) input level.
+        high = True
+        try:
+            high = self._io.read_bnc_in1() if which == "IN1" else self._io.read_bnc_in2()
+        except Exception:  # noqa: BLE001 — no GPIO hardware / read error
+            pass
+        edge = "rising" if high else "falling"
+        action = cfg.rising_action if high else cfg.falling_action
+
         tile = self._bnc_tiles.get(f"bnc_{which.lower()}")
         if tile is not None:
             tile["last_edge_ts"] = ts
             dpg.configure_item(tile["dot"], color=_COLOR_GREEN)
-            dpg.set_value(tile["last_text"], f"Last: {time.strftime('%H:%M:%S', time.localtime(ts))}")
+            dpg.set_value(
+                tile["last_text"],
+                f"Last: {edge} @ {time.strftime('%H:%M:%S', time.localtime(ts))}",
+            )
 
         if self._log:
             self._log.add(LogEntry(
                 timestamp=ts, direction="RX", node_id=0, frame_type="BNC",
-                event_name=f"{which} edge", raw_id=0, raw_data=b"",
-                details=f"label={cfg.label or '—'} action={cfg.action or '(none)'}",
+                event_name=f"{which} {edge}", raw_id=0, raw_data=b"",
+                details=f"label={cfg.label or '—'} action={action or '(none)'}",
             ))
 
         # Always forward to a running experiment so @exp.on_bnc_in works.
         if self._exp.is_running:
-            self._exp.forward_bnc(which, ts=ts, high=True)
+            self._exp.forward_bnc(which, ts=ts, high=high)
 
-        if cfg.enabled and cfg.action:
-            self._dispatch_bnc_action(cfg.action)
+        if cfg.enabled and action:
+            self._dispatch_bnc_action(action)
 
     def _dispatch_bnc_action(self, action: str) -> None:
         """Dispatch curated BNC IN actions (commands + experiment control)."""
@@ -1706,8 +1900,8 @@ class VFMApp:
             return
         if keyword == "dispense_all":
             self._broadcast(CanCmd.Dispense)
-        elif keyword == "abort_all":
-            self._broadcast(CanCmd.Abort)
+        elif keyword == "recover_all":
+            self._broadcast(CanCmd.Recover)
         elif keyword == "ping_all":
             self._broadcast(CanCmd.Ping)
         elif keyword == "reqstatus_all":
@@ -1741,7 +1935,7 @@ class VFMApp:
             self._log.add(LogEntry(
                 timestamp=time.time(), direction="TX", node_id=0, frame_type="BNC",
                 event_name="BNC OUT pulse", raw_id=0, raw_data=b"",
-                details=f"trigger={cfg.trigger} width={cfg.pulse_width_us}us matched={event_name}",
+                details=f"trigger={cfg.trigger} width={cfg.pulse_width_us // 1000}ms matched={event_name}",
             ))
 
     def _on_bnc_manual_pulse(self) -> None:
@@ -1756,19 +1950,28 @@ class VFMApp:
             self._log.add(LogEntry(
                 timestamp=time.time(), direction="TX", node_id=0, frame_type="BNC",
                 event_name="BNC OUT manual pulse", raw_id=0, raw_data=b"",
-                details=f"width={width}us",
+                details=f"width={width // 1000}ms",
             ))
 
     def _refresh_bnc_dots(self) -> None:
-        """Decay the BNC IN/OUT indicator dots back to grey shortly after the last edge/pulse."""
-        now = time.time()
-        for key in ("bnc_in1", "bnc_in2", "bnc_out"):
-            tile = self._bnc_tiles.get(key)
-            if tile is None:
-                continue
-            last = tile.get("last_edge_ts", tile.get("last_pulse_ts", 0.0))
-            if (now - last) > 0.3:
-                dpg.configure_item(tile["dot"], color=_COLOR_GREY)
+        """Update BNC IN/OUT indicator dots to reflect actual signal state (green=HIGH, grey=LOW)."""
+        if not self._io:
+            return
+        # BNC IN 0
+        tile = self._bnc_tiles.get("bnc_in0")
+        if tile is not None:
+            color = _COLOR_GREEN if self._io.read_bnc_in1() else _COLOR_GREY
+            dpg.configure_item(tile["dot"], color=color)
+        # BNC IN 1
+        tile = self._bnc_tiles.get("bnc_in1")
+        if tile is not None:
+            color = _COLOR_GREEN if self._io.read_bnc_in2() else _COLOR_GREY
+            dpg.configure_item(tile["dot"], color=color)
+        # BNC OUT
+        tile = self._bnc_tiles.get("bnc_out")
+        if tile is not None:
+            color = _COLOR_GREEN if self._io.read_bnc_out() else _COLOR_GREY
+            dpg.configure_item(tile["dot"], color=color)
 
     # ------------------------------------------------------------------
     # Label change
@@ -1777,6 +1980,9 @@ class VFMApp:
     def _on_label_change(self, node_id: int, new_label: str) -> None:
         if self._registry:
             self._registry.set_label(node_id, new_label)
+            node = self._registry.get(node_id)
+            if node and node.mac and self._mac_registry:
+                self._mac_registry.set_label(node.mac, new_label)
 
     # ------------------------------------------------------------------
     # Log actions
@@ -1791,7 +1997,7 @@ class VFMApp:
         if not self._log:
             return
         path = self._log.export(
-            f"~/vfm_logs/export_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+            f"~/sfm_logs/export_{time.strftime('%Y%m%d_%H%M%S')}.csv"
         )
         dpg.set_value("log_count_text", f"  Exported → {path.name}")
 
@@ -1816,5 +2022,5 @@ class VFMApp:
 # ---------------------------------------------------------------------------
 
 def main(args: argparse.Namespace) -> None:
-    app = VFMApp(args)
+    app = SFMApp(args)
     app.run()

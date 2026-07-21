@@ -31,7 +31,7 @@ from .protocol import (
 
 class CanManager:
     """
-    Thin SocketCAN wrapper for the VFM base station.
+    Thin SocketCAN wrapper for the SFM base station.
 
     Usage::
 
@@ -66,7 +66,7 @@ class CanManager:
         self._running = True
         self._rx_thread = threading.Thread(
             target=self._rx_loop,
-            name="vfm-can-rx",
+            name="sfm-can-rx",
             daemon=True,
         )
         self._rx_thread.start()

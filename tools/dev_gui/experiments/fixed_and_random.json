@@ -1,0 +1,66 @@
+{
+  "name": "fixed_and_random",
+  "label": "Fixed + Random",
+  "template": "fixed_and_random",
+  "description": "Per-node roles: Fixed nodes dispense every cycle, Random nodes dispense at the set probability, Off nodes are inactive. Trigger by timer or BNC IN rising edge.",
+  "parameters": [
+    {
+      "key": "node_roles",
+      "label": "Node role",
+      "type": "node_choice",
+      "default": "random",
+      "options": ["off", "fixed", "random"],
+      "help": "off = inactive, fixed = every cycle, random = at the probability below"
+    },
+    {
+      "key": "trigger",
+      "label": "Trigger",
+      "type": "choice",
+      "default": "timer",
+      "options": ["timer", "bnc"]
+    },
+    {
+      "key": "interval_s",
+      "label": "Timer interval (s)",
+      "type": "float",
+      "default": 10.0,
+      "min": 0,
+      "max": 3600,
+      "help": "Used when Trigger = timer",
+      "visible_when": {"trigger": "timer"}
+    },
+    {
+      "key": "bnc_channel",
+      "label": "BNC IN channel",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 1,
+      "help": "0 = first BNC input, 1 = second",
+      "visible_when": {"trigger": "bnc"}
+    },
+    {
+      "key": "random_prob",
+      "label": "Random dispense prob",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "help": "Chance each Random node dispenses per cycle"
+    },
+    {
+      "key": "minutes",
+      "label": "Duration (min)",
+      "type": "float",
+      "default": 0,
+      "help": "0 = no limit"
+    },
+    {
+      "key": "max_pellets",
+      "label": "Max pellets",
+      "type": "int",
+      "default": 0,
+      "help": "0 = no cap"
+    }
+  ]
+}

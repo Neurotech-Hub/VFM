@@ -47,7 +47,7 @@ class Experiment:
             for n in ctx.nodes:
                 ctx.dispense(n)
 
-        @exp.on(EventKind.ACCESS_ATTEMPT)
+        @exp.on(EventKind.CATCH_ATTEMPT)
         def attempted(ctx, ev):
             ctx.log("retrieval_attempt", node=ev.node_id)
 
@@ -95,8 +95,8 @@ class Experiment:
 
     # Sugar decorators for the most common event kinds -------------------
 
-    def on_access_attempt(self, fn: EventCb) -> EventCb:
-        return self.on(EventKind.ACCESS_ATTEMPT)(fn)
+    def on_catch_attempt(self, fn: EventCb) -> EventCb:
+        return self.on(EventKind.CATCH_ATTEMPT)(fn)
 
     def on_dome_closed(self, fn: EventCb) -> EventCb:
         return self.on(EventKind.DOME_CLOSED)(fn)
@@ -112,6 +112,10 @@ class Experiment:
 
     def on_fault(self, fn: EventCb) -> EventCb:
         return self.on(EventKind.FAULT)(fn)
+
+    def on_recover(self, fn: EventCb) -> EventCb:
+        """Fired when an operator recovers a faulted node (re-arm the node here)."""
+        return self.on(EventKind.NODE_RECOVERED)(fn)
 
     def on_bnc_in(self, fn: EventCb) -> EventCb:
         return self.on(EventKind.BNC_IN)(fn)
@@ -303,6 +307,23 @@ class ExperimentRunner:
             self.normalizer.inject_bnc_in(channel, edge, ts, high=high)
         )
 
+    def recover_node(self, node_id: int, now: Optional[float] = None) -> None:
+        """
+        Operator-initiated recovery of a faulted node.
+
+        Clears the node's halted state, sends Recover (clears the firmware
+        fault), then fires NODE_RECOVERED handlers so a template can re-arm it.
+        No-op after the session ends.
+        """
+        if self._finished:
+            return
+        now = now if now is not None else time.time()
+        self.ctx.set_now(now)
+        self.ctx.recover_node(node_id)
+        self._fire_handlers(
+            NodeEvent(kind=EventKind.NODE_RECOVERED, node_id=node_id, timestamp=now)
+        )
+
     def step(
         self,
         now: Optional[float] = None,
@@ -376,7 +397,7 @@ class ExperimentRunner:
                 pass
             edge = "rising" if high else "falling"
             self._bnc_queue.append(
-                self.normalizer.inject_bnc_in(1, edge, time.time(), high=high)
+                self.normalizer.inject_bnc_in(0, edge, time.time(), high=high)
             )
 
         def on_in2() -> None:
@@ -387,7 +408,7 @@ class ExperimentRunner:
                 pass
             edge = "rising" if high else "falling"
             self._bnc_queue.append(
-                self.normalizer.inject_bnc_in(2, edge, time.time(), high=high)
+                self.normalizer.inject_bnc_in(1, edge, time.time(), high=high)
             )
 
         io.on_bnc_in1_edge(on_in1)
@@ -451,6 +472,11 @@ class ExperimentRunner:
             # Auto-count pellets presented for end_after(pellets=...).
             if ev.kind == EventKind.PELLET_PRESENTED:
                 self.ctx.incr("pellets")
+            # Sticky per-node fault: halt just this node (cancel its timers,
+            # make its dispenses no-ops) before user handlers run. The rest of
+            # the experiment keeps running until an operator recovers the node.
+            elif ev.kind == EventKind.FAULT:
+                self.ctx.halt_node(ev.node_id)
             self._fire_handlers(ev)
 
     def _fire_handlers(self, ev: NodeEvent) -> None:

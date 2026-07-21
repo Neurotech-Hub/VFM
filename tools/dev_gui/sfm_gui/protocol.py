@@ -22,7 +22,7 @@ class CanCmd(IntEnum):
     """Commands sent from base station to a node (CAN ID 0x100 + nodeId)."""
     Ping      = 0x01
     Dispense  = 0x02
-    Abort     = 0x03
+    Recover   = 0x03
     AssignId  = 0x04  # payload byte[0] = new nodeId
     SetConfig = 0x05  # payload TBD
     ReqStatus = 0x06
@@ -33,7 +33,7 @@ class CanEvent(IntEnum):
     """Events sent from a node to the base station (CAN ID 0x300 + nodeId)."""
     PelletLoaded    = 0x01  # "Loaded" — PG1 detected
     PelletPresented = 0x02
-    AccessAttempt   = 0x03
+    CatchAttempt    = 0x03
     Fault           = 0x04  # raw_extra[0] = ServiceStatus (Timeout/Jam)
     Pong            = 0x05
     InputChanged    = 0x06
@@ -46,6 +46,7 @@ class CanEvent(IntEnum):
 # Friendly event-log labels for dispense phases (CanEvent.name may differ).
 CAN_EVENT_DISPLAY_NAME = {
     CanEvent.PelletLoaded: "Loaded",
+    CanEvent.CatchAttempt: "Catch attempt",
     CanEvent.Lowering: "Lowering",
     CanEvent.Loading: "Loading",
     CanEvent.Raising: "Raising",
@@ -64,17 +65,17 @@ class InputId(IntEnum):
 class DispenseState(IntEnum):
     """Dispenser FSM states carried in heartbeat byte 0.
 
-    Loading mirrors firmware Feeding (value 2). AccessAttempt is GUI-only
-    (not in heartbeats); set from CanEvent.AccessAttempt until the next HB.
+    Loading mirrors firmware Feeding (value 2). CatchAttempt is GUI-only
+    (not in heartbeats); set from CanEvent.CatchAttempt until the next HB.
     """
     Idle          = 0
     Lowering      = 1  # M2 down until PG2
     Loading       = 2  # M1 feeding pellet (firmware: Feeding)
     Raising       = 3  # M2 up by step count
-    Presented     = 4  # Pellet at top; waits for Abort / next Dispense
+    Presented     = 4  # Pellet at top; waits for Recover / next Dispense
     SeekingAway   = 5  # M2 up until PG2 clears (was Taken)
     Fault         = 6  # Timeout / jam
-    AccessAttempt = 7  # GUI overlay after PG3 access event (HB still Presented)
+    CatchAttempt  = 7  # GUI overlay after PG3 catch event (HB still Presented)
 
 
 class ServiceStatus(IntEnum):

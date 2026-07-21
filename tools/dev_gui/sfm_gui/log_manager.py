@@ -64,7 +64,7 @@ class LogManager:
 
     Usage::
 
-        lm = LogManager(log_dir="~/vfm_logs", auto_save=True)
+        lm = LogManager(log_dir="~/sfm_logs", auto_save=True)
         lm.add(LogEntry(...))
         entries = lm.get_filtered(show_heartbeats=False)
         lm.export("~/Desktop/my_session.csv")
@@ -85,7 +85,7 @@ class LogManager:
     def __init__(
         self,
         max_entries: int = 1000,
-        log_dir: str = "~/vfm_logs",
+        log_dir: str = "~/sfm_logs",
         auto_save: bool = True,
     ) -> None:
         self._max_entries = max_entries

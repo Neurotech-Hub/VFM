@@ -1,4 +1,4 @@
-"""Tests for vfm_gui.node_registry."""
+"""Tests for sfm_gui.node_registry."""
 
 import sys
 import os
@@ -6,8 +6,8 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from vfm_gui.node_registry import NodeRegistry, NodeState
-from vfm_gui.protocol import (
+from sfm_gui.node_registry import NodeRegistry, NodeState
+from sfm_gui.protocol import (
     CanEvent,
     InputId,
     DispenseState,
@@ -94,7 +94,7 @@ class TestNodeRegistry:
             (CanEvent.Loading, DispenseState.Loading, "LOADING"),
             (CanEvent.PelletLoaded, DispenseState.Loading, "LOADING"),
             (CanEvent.Raising, DispenseState.Raising, "RAISING"),
-            (CanEvent.AccessAttempt, DispenseState.AccessAttempt, "ACCESSATTEMPT"),
+            (CanEvent.CatchAttempt, DispenseState.CatchAttempt, "CATCHATTEMPT"),
         ]
         for event, state, label in seq:
             reg.update_from_event(1, event)

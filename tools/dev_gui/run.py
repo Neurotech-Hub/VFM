@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run.py — VFM Developer GUI entry point.
+run.py — SFM Developer GUI entry point.
 
 Usage:
     python run.py                          # defaults: can0, 250000 bps, 9 nodes
@@ -15,12 +15,12 @@ before clicking "Start Session".
 import argparse
 import sys
 
-from vfm_gui.app import main
+from sfm_gui.app import main
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        prog="vfm-gui",
-        description="VFM Developer GUI — Base Station Control & Monitoring",
+        prog="sfm-gui",
+        description="SFM Developer GUI — Spatial Foraging Module base station control & monitoring",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -45,7 +45,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--log-dir",
-        default="~/vfm_logs",
+        default="~/sfm_logs",
         metavar="DIR",
         help="Directory for CSV session logs",
     )

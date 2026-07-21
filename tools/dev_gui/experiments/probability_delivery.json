@@ -1,0 +1,58 @@
+{
+  "name": "probability_delivery",
+  "label": "Probability Delivery",
+  "template": "probability_delivery",
+  "description": "Each cycle delivers on ONE node, picked by a weighted random draw (e.g. 20% / 80% — not a fixed 20-of-100 split, each cycle is independently random). Trigger by timer or BNC IN rising edge.",
+  "parameters": [
+    {
+      "key": "probabilities",
+      "label": "Node weight (%)",
+      "type": "node_number",
+      "default": "",
+      "min": 0,
+      "max": 100,
+      "help": "Per-node pick weight. 0 = that node never gets a pellet."
+    },
+    {
+      "key": "trigger",
+      "label": "Trigger",
+      "type": "choice",
+      "default": "timer",
+      "options": ["timer", "bnc"]
+    },
+    {
+      "key": "interval_s",
+      "label": "Timer interval (s)",
+      "type": "float",
+      "default": 10.0,
+      "min": 0,
+      "max": 3600,
+      "help": "Used when Trigger = timer",
+      "visible_when": {"trigger": "timer"}
+    },
+    {
+      "key": "bnc_channel",
+      "label": "BNC IN channel",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 1,
+      "help": "0 = first BNC input, 1 = second",
+      "visible_when": {"trigger": "bnc"}
+    },
+    {
+      "key": "minutes",
+      "label": "Duration (min)",
+      "type": "float",
+      "default": 0,
+      "help": "0 = no limit"
+    },
+    {
+      "key": "max_pellets",
+      "label": "Max pellets",
+      "type": "int",
+      "default": 0,
+      "help": "0 = no cap"
+    }
+  ]
+}

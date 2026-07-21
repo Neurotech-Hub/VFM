@@ -1,7 +1,7 @@
 """
 context.py — User-facing ExperimentContext passed into callbacks.
 
-Provides actions (dispense, abort, BNC pulse), timers (after / every),
+Provides actions (dispense, recover, BNC pulse), timers (after / every),
 named counters, elapsed time, and experiment-level logging.
 """
 
@@ -30,6 +30,7 @@ class _Timer:
     callback: TimerCallback
     interval: Optional[float] = None  # None = one-shot; else repeating
     cancelled: bool = False
+    node: int = 0  # 0 = not node-scoped; else tied to a node's program
 
 
 @dataclass
@@ -80,6 +81,9 @@ class ExperimentContext:
         self._counters: Dict[str, int] = {}
         self._timers: List[_Timer] = []
         self._log_entries: List[ExperimentLogEntry] = []
+        # Nodes latched into a fault; dispense() is a no-op for them until
+        # an operator recovers the node (see halt_node / recover_node).
+        self._halted: set = set()
         self._csv_file = None
         self._csv_writer = None
         self._log_path: Optional[Path] = None
@@ -143,20 +147,29 @@ class ExperimentContext:
     # ------------------------------------------------------------------
 
     def dispense(self, node: int) -> bool:
-        """Send Dispense to one node."""
+        """
+        Send Dispense to one node.
+
+        No-op (logged) while the node is halted by a fault — templates can keep
+        calling ``dispense(n)`` unconditionally; a faulted node simply stops
+        receiving pellets until recovered.
+        """
+        if node in self._halted:
+            self.log("dispense_skipped_halted", node=node)
+            return False
         return self._send(node, CanCmd.Dispense)
 
-    def abort(self, node: int) -> bool:
-        """Send Abort to one node."""
-        return self._send(node, CanCmd.Abort)
+    def recover(self, node: int) -> bool:
+        """Send Recover to one node."""
+        return self._send(node, CanCmd.Recover)
 
     def broadcast_dispense(self) -> bool:
         """Send Dispense to all nodes (broadcast)."""
         return self._send(0, CanCmd.Dispense)
 
-    def broadcast_abort(self) -> bool:
-        """Send Abort to all nodes (broadcast)."""
-        return self._send(0, CanCmd.Abort)
+    def broadcast_recover(self) -> bool:
+        """Send Recover to all nodes (broadcast)."""
+        return self._send(0, CanCmd.Recover)
 
     def set_heartbeat_interval(self, node: int, ms: int) -> bool:
         """SetConfig HeartbeatInterval for one node."""
@@ -170,24 +183,77 @@ class ExperimentContext:
         self.log("bnc_pulse", duration_us=duration_us)
 
     # ------------------------------------------------------------------
+    # Per-node fault handling (sticky)
+    # ------------------------------------------------------------------
+
+    def halt_node(self, node_id: int) -> None:
+        """
+        Latch ``node_id`` into a halted state after a fault.
+
+        Cancels the node's pending timers (so a scheduled reload cannot fire)
+        and makes ``dispense(node_id)`` a no-op until ``recover_node``. Other
+        nodes are unaffected — the rest of the experiment keeps running.
+        """
+        if node_id in self._halted:
+            return
+        self._halted.add(node_id)
+        self.cancel_node_timers(node_id)
+        self.log("node_halted", node=node_id)
+
+    def recover_node(self, node_id: int) -> None:
+        """
+        Clear a node's halted state and clear its firmware fault.
+
+        Sends ``Recover`` to the node (firmware ``abort()`` resets the fault to
+        Idle) and un-latches it so ``dispense`` works again. The runner fires
+        ``on_recover`` handlers afterwards so a template can re-arm the node.
+        """
+        self._halted.discard(node_id)
+        self._send(node_id, CanCmd.Recover)
+        self.log("node_recovered", node=node_id)
+
+    def is_halted(self, node_id: int) -> bool:
+        return node_id in self._halted
+
+    @property
+    def halted_nodes(self) -> List[int]:
+        return sorted(self._halted)
+
+    # ------------------------------------------------------------------
     # Timers
     # ------------------------------------------------------------------
 
-    def after(self, seconds: float, callback: TimerCallback) -> _Timer:
-        """Schedule a one-shot callback after ``seconds`` (uses runner clock)."""
-        timer = _Timer(fire_at=self._now + max(0.0, float(seconds)), callback=callback)
+    def after(self, seconds: float, callback: TimerCallback, node: int = 0) -> _Timer:
+        """
+        Schedule a one-shot callback after ``seconds`` (uses runner clock).
+
+        Pass ``node`` to tie the timer to a node's program so it is cancelled
+        automatically if that node faults (``halt_node``).
+        """
+        timer = _Timer(
+            fire_at=self._now + max(0.0, float(seconds)), callback=callback, node=node
+        )
         self._timers.append(timer)
         return timer
 
-    def every(self, seconds: float, callback: TimerCallback) -> _Timer:
+    def every(self, seconds: float, callback: TimerCallback, node: int = 0) -> _Timer:
         """Schedule a repeating callback every ``seconds`` (uses runner clock)."""
         interval = max(0.001, float(seconds))
-        timer = _Timer(fire_at=self._now + interval, callback=callback, interval=interval)
+        timer = _Timer(
+            fire_at=self._now + interval, callback=callback, interval=interval, node=node
+        )
         self._timers.append(timer)
         return timer
 
     def cancel_timer(self, timer: _Timer) -> None:
         timer.cancelled = True
+
+    def cancel_node_timers(self, node_id: int) -> None:
+        """Cancel every pending timer tied to ``node_id``."""
+        for timer in self._timers:
+            if timer.node == node_id:
+                timer.cancelled = True
+        self._timers = [t for t in self._timers if not t.cancelled]
 
     def cancel_all_timers(self) -> None:
         """Cancel every pending one-shot / repeating timer."""

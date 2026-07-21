@@ -1,4 +1,4 @@
-"""Tests for vfm_gui.log_manager."""
+"""Tests for sfm_gui.log_manager."""
 
 import sys
 import os
@@ -8,7 +8,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from vfm_gui.log_manager import LogManager, LogEntry
+from sfm_gui.log_manager import LogManager, LogEntry
 
 
 def make_entry(**kwargs) -> LogEntry:

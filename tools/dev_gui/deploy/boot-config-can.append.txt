@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# VFM Base Station — CAN HAT device tree overlay and GPIO configuration
+# SFM Base Station — CAN HAT device tree overlay and GPIO configuration
 #
 # Append the lines below to /boot/firmware/config.txt on the Raspberry Pi 5
 # (Raspberry Pi OS Bookworm or later), then reboot.

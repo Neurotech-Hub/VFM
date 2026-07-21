@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_experiment.py — CLI to load and run a VFM experiment template/script.
+run_experiment.py — CLI to load and run a SFM experiment template/script.
 
 Examples::
 
@@ -28,8 +28,8 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from vfm_gui.experiment import Experiment  # noqa: E402
-from vfm_gui.experiment.templates import free_feeding  # noqa: E402
+from sfm_gui.experiment import Experiment  # noqa: E402
+from sfm_gui.experiment.templates import free_feeding  # noqa: E402
 
 
 BUILTIN_TEMPLATES = {
@@ -67,14 +67,13 @@ def _resolve_experiment(args: argparse.Namespace) -> Experiment:
             minutes=args.minutes,
             seconds=args.seconds,
             max_pellets=args.max_pellets,
-            pulse_bnc_on_dispense=args.bnc_on_dispense,
         )
 
     path = Path(target)
     if not path.exists():
-        # Try as dotted module under vfm_gui.experiment.templates
+        # Try as dotted module under sfm_gui.experiment.templates
         try:
-            mod = importlib.import_module(f"vfm_gui.experiment.templates.{target}")
+            mod = importlib.import_module(f"sfm_gui.experiment.templates.{target}")
         except ImportError as exc:
             raise SystemExit(
                 f"Unknown template/script '{target}'. "
@@ -112,7 +111,7 @@ def _resolve_experiment(args: argparse.Namespace) -> Experiment:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run a VFM experiment (template or user script) against SocketCAN.",
+        description="Run a SFM experiment (template or user script) against SocketCAN.",
     )
     parser.add_argument(
         "target",
@@ -158,14 +157,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Free-feeding: seconds after dome close before re-dispense (default: 2)",
     )
     parser.add_argument(
-        "--bnc-on-dispense",
-        action="store_true",
-        help="Pulse BNC OUT on every dispense",
-    )
-    parser.add_argument(
         "--log-dir",
-        default="~/vfm_logs",
-        help="Directory for experiment CSV logs (default: ~/vfm_logs)",
+        default="~/sfm_logs",
+        help="Directory for experiment CSV logs (default: ~/sfm_logs)",
     )
     parser.add_argument(
         "--no-io",

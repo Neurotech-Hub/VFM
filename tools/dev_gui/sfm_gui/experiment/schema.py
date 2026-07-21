@@ -21,18 +21,33 @@ DEFAULT_EXPERIMENTS_DIR = Path(__file__).resolve().parents[2] / "experiments"
 BuilderFn = Callable[..., Experiment]
 
 
+# Param types the GUI renders one-widget-per-node for. Their collected value
+# is a dict keyed by node_id (or, for "nodes", a list of active node ids).
+NODE_PARAM_TYPES = ("nodes", "node_number", "node_choice")
+
+# All valid param types.
+PARAM_TYPES = ("int", "float", "bool", "str", "choice") + NODE_PARAM_TYPES
+
+
 @dataclass
 class ExperimentParam:
     """One tunable parameter exposed in the GUI."""
 
     key: str
     label: str
-    type: str  # int | float | bool | str | choice
+    type: str  # see PARAM_TYPES
     default: Any = None
     min: Optional[float] = None
     max: Optional[float] = None
     help: str = ""
     options: List[str] = field(default_factory=list)
+    # Conditional display: {controlling_key: value | [values]}. The param is
+    # shown/collected only when the controlling param equals one of the values.
+    visible_when: Optional[Dict[str, Any]] = None
+
+    @property
+    def is_node_param(self) -> bool:
+        return self.type in NODE_PARAM_TYPES
 
 
 @dataclass
@@ -52,8 +67,11 @@ class ExperimentDef:
 
 def _parse_param(raw: dict) -> ExperimentParam:
     ptype = str(raw.get("type", "str"))
-    if ptype not in ("int", "float", "bool", "str", "choice"):
+    if ptype not in PARAM_TYPES:
         raise ValueError(f"Unsupported parameter type: {ptype}")
+    visible_when = raw.get("visible_when")
+    if visible_when is not None and not isinstance(visible_when, dict):
+        raise ValueError("visible_when must be an object {key: value|[values]}")
     return ExperimentParam(
         key=str(raw["key"]),
         label=str(raw.get("label", raw["key"])),
@@ -63,6 +81,7 @@ def _parse_param(raw: dict) -> ExperimentParam:
         max=raw.get("max"),
         help=str(raw.get("help", "")),
         options=[str(o) for o in raw.get("options", [])],
+        visible_when=dict(visible_when) if visible_when else None,
     )
 
 
@@ -98,17 +117,21 @@ def resolve_builder(template: str) -> BuilderFn:
     Resolve a template name to a ``build(**kwargs) -> Experiment`` callable.
 
     Looks up builtins first (``free_feeding``), then
-    ``vfm_gui.experiment.templates.<name>.build``.
+    ``sfm_gui.experiment.templates.<name>.build``.
     """
     from .templates import free_feeding as free_feeding_build
+    from .templates import fixed_and_random as fixed_and_random_build
+    from .templates import probability_delivery as probability_delivery_build
 
     builtins: Dict[str, BuilderFn] = {
         "free_feeding": free_feeding_build,
+        "fixed_and_random": fixed_and_random_build,
+        "probability_delivery": probability_delivery_build,
     }
     if template in builtins:
         return builtins[template]
 
-    mod = importlib.import_module(f"vfm_gui.experiment.templates.{template}")
+    mod = importlib.import_module(f"sfm_gui.experiment.templates.{template}")
     if not hasattr(mod, "build") or not callable(mod.build):
         raise ImportError(f"Template '{template}' has no build() factory")
     return mod.build
@@ -129,7 +152,25 @@ def coerce_param_value(param: ExperimentParam, value: Any) -> Any:
         if param.options and s not in param.options:
             return param.default if param.default in param.options else param.options[0]
         return s
+    if param.is_node_param:
+        # Node-scoped params pass through as-is: a dict {node_id: value} (or a
+        # list of node ids for "nodes") from the GUI, or a string/list default
+        # for headless runs that the template parses itself.
+        return value
     return "" if value is None else str(value)
+
+
+def param_visible(param: ExperimentParam, values: Dict[str, Any]) -> bool:
+    """Evaluate a param's ``visible_when`` against current parameter values."""
+    cond = param.visible_when
+    if not cond:
+        return True
+    for key, wanted in cond.items():
+        current = values.get(key)
+        allowed = wanted if isinstance(wanted, (list, tuple, set)) else [wanted]
+        if current not in allowed:
+            return False
+    return True
 
 
 def build_experiment(
@@ -154,7 +195,10 @@ def build_experiment(
     if "max_pellets" in values and (values["max_pellets"] is None or int(values["max_pellets"]) <= 0):
         values["max_pellets"] = None
 
-    kwargs: Dict[str, Any] = dict(values)
+    # A "nodes"-typed param supplies the nodes= argument, not a build kwarg.
+    nodes_keys = {p.key for p in exp_def.parameters if p.type == "nodes"}
+
+    kwargs: Dict[str, Any] = {k: v for k, v in values.items() if k not in nodes_keys}
     if nodes is not None:
         kwargs["nodes"] = list(nodes)
 

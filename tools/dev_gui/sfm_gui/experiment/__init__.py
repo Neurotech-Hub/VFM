@@ -1,5 +1,5 @@
 """
-experiment — headless, event-driven experiment engine for VFM.
+experiment — headless, event-driven experiment engine for SFM.
 
 Users write short scripts (or pick a template) whose callbacks decide what
 to do next in response to node events. The engine consumes the CAN event

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-test_hat.py — Interactive hardware validation for the VFM base station CAN HAT.
+test_hat.py — Interactive hardware validation for the SFM base station CAN HAT.
 
 This is NOT a pytest suite (despite the filename, chosen to match the plan) —
 it is a manual, interactive checklist you run directly on the Raspberry Pi
@@ -34,10 +34,10 @@ import time
 from pathlib import Path
 
 # Allow running this script directly (`python tests/test_hat.py`) without
-# installing the vfm_gui package.
+# installing the sfm_gui package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from vfm_gui.io_manager import IOManager  # noqa: E402
+from sfm_gui.io_manager import IOManager  # noqa: E402
 
 RESULTS: list[tuple[str, bool]] = []
 
@@ -255,7 +255,7 @@ SECTIONS = ("can", "aeo", "bnc_out", "bnc_in", "button", "full_loop")
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="VFM base station HAT interactive hardware validation",
+        description="SFM base station HAT interactive hardware validation",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--interface", "-i", default="can0", help="SocketCAN interface")
@@ -266,7 +266,7 @@ def main() -> None:
     args = parser.parse_args()
     skip = {s.strip() for s in args.skip.split(",") if s.strip()}
 
-    print("VFM Base Station HAT Test\n" + "=" * 40)
+    print("SFM Base Station HAT Test\n" + "=" * 40)
 
     io = IOManager()
     io.begin()

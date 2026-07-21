@@ -112,9 +112,23 @@ class ExperimentController:
         """Forward a GUI BNC IN edge into the running experiment."""
         if self._runner is None or self._runner.is_finished:
             return
-        channel = 1 if which.upper() in ("IN1", "1", "BNC_IN1") else 2
+        # Channel numbering is 0-based: IN1 → 0, IN2 → 1.
+        channel = 0 if which.upper() in ("IN1", "BNC_IN1") else 1
         edge = "rising" if high else "falling"
         self._runner.feed_bnc_in(channel, edge, now=ts, high=high)
+
+    def recover_node(self, node_id: int, now: Optional[float] = None) -> bool:
+        """
+        Recover a faulted node in the running experiment.
+
+        Returns False when no experiment is active (the caller should fall back
+        to sending a plain Recover). Clears the node's fault and re-arms it via
+        the template's on_recover handler.
+        """
+        if self._runner is None or self._runner.is_finished:
+            return False
+        self._runner.recover_node(node_id, now=now)
+        return True
 
     def status_line(self) -> str:
         """Short status for the experiment panel."""

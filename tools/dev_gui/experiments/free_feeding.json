@@ -2,13 +2,19 @@
   "name": "free_feeding",
   "label": "Free Feeding",
   "template": "free_feeding",
-  "description": "Load all nodes; re-dispense after dome close; end on duration/pellet cap.",
+  "description": "Load the active nodes; re-dispense after dome close; end on duration/pellet cap.",
   "parameters": [
+    {
+      "key": "nodes",
+      "label": "Active nodes",
+      "type": "nodes",
+      "help": "Nodes this experiment runs on"
+    },
     {
       "key": "reload_delay_s",
       "label": "Reload delay (s)",
-      "type": "float",
-      "default": 2.0,
+      "type": "int",
+      "default": 30,
       "min": 0,
       "max": 3600
     },
@@ -25,12 +31,6 @@
       "type": "int",
       "default": 0,
       "help": "0 = no cap"
-    },
-    {
-      "key": "pulse_bnc_on_dispense",
-      "label": "Pulse BNC on dispense",
-      "type": "bool",
-      "default": false
     }
   ]
 }

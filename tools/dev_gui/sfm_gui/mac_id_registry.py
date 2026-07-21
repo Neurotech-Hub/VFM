@@ -3,6 +3,7 @@ mac_id_registry.py — Persistent MAC ↔ Node ID dictionary for the base statio
 
 Stores assignments so a returning module (same MAC) gets the same CAN Node ID
 it had in a previous session, instead of being auto-assigned a new sequential ID.
+Also stores user-defined node labels keyed by MAC.
 
 File format (JSON)::
 
@@ -11,10 +12,14 @@ File format (JSON)::
       "mappings": {
         "AA:BB:CC:DD:EE:01": 1,
         "AA:BB:CC:DD:EE:02": 2
+      },
+      "labels": {
+        "AA:BB:CC:DD:EE:01": "lower left",
+        "AA:BB:CC:DD:EE:02": "center"
       }
     }
 
-Default path: ``~/.vfm/mac_id_registry.json``.
+Default path: ``~/.sfm/mac_id_registry.json``.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from typing import Dict, Optional
 from .protocol import format_mac
 
 
-DEFAULT_REGISTRY_PATH = Path("~/.vfm/mac_id_registry.json")
+DEFAULT_REGISTRY_PATH = Path("~/.sfm/mac_id_registry.json")
 
 
 def parse_mac(mac_str: str) -> bytes:
@@ -50,6 +55,7 @@ class MacIdRegistry:
         self._path = Path(path or DEFAULT_REGISTRY_PATH).expanduser().resolve()
         self._mac_to_id: Dict[str, int] = {}
         self._id_to_mac: Dict[int, str] = {}
+        self._mac_to_label: Dict[str, str] = {}
         self.load()
 
     # ------------------------------------------------------------------
@@ -61,9 +67,10 @@ class MacIdRegistry:
         return self._path
 
     def load(self) -> None:
-        """Load mappings from disk. Missing / corrupt file → empty registry."""
+        """Load mappings and labels from disk. Missing / corrupt file → empty registry."""
         self._mac_to_id.clear()
         self._id_to_mac.clear()
+        self._mac_to_label.clear()
         if not self._path.is_file():
             return
         try:
@@ -82,17 +89,30 @@ class MacIdRegistry:
                 key = str(mac_str).upper()
                 # Last write wins on conflicts during load
                 self._put(key, node_id)
+            # Load labels
+            labels = data.get("labels", {})
+            if isinstance(labels, dict):
+                for mac_str, label in labels.items():
+                    if isinstance(label, str):
+                        try:
+                            parse_mac(str(mac_str))
+                        except ValueError:
+                            continue
+                        self._mac_to_label[str(mac_str).upper()] = label
         except (OSError, json.JSONDecodeError, TypeError):
             self._mac_to_id.clear()
             self._id_to_mac.clear()
+            self._mac_to_label.clear()
 
     def save(self) -> None:
-        """Write the current dictionary to disk."""
+        """Write the current dictionary and labels to disk."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": 1,
             "mappings": dict(sorted(self._mac_to_id.items(), key=lambda kv: kv[1])),
         }
+        if self._mac_to_label:
+            payload["labels"] = dict(sorted(self._mac_to_label.items()))
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -141,6 +161,20 @@ class MacIdRegistry:
         """Wipe the dictionary and delete / rewrite the file."""
         self._mac_to_id.clear()
         self._id_to_mac.clear()
+        self._mac_to_label.clear()
+        self.save()
+
+    def get_label(self, mac: bytes) -> Optional[str]:
+        """Return the user-defined label for ``mac``, or None."""
+        return self._mac_to_label.get(format_mac(mac))
+
+    def set_label(self, mac: bytes, label: str) -> None:
+        """Store a user-defined label for ``mac`` and persist immediately."""
+        key = format_mac(mac)
+        if label.strip():
+            self._mac_to_label[key] = label.strip()
+        else:
+            self._mac_to_label.pop(key, None)
         self.save()
 
     def next_free_id(self, start: int = 1) -> int:

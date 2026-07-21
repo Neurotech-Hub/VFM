@@ -3,18 +3,18 @@ free_feeding.py — Free-feeding (continuous reload) experiment template.
 
 Behavior:
   1. On session start, dispense a pellet on every configured node.
-  2. On AccessAttempt (retrieval attempt), log it.
+  2. On CatchAttempt (retrieval attempt), log it.
   3. On dome close (PG3 cleared after being open), wait ``reload_delay_s``
      then re-dispense that node.
-  4. On Fault (jam / timeout), abort all nodes and **stop the session** —
-     a fault means no pellet was delivered; do not wait for the dome or
-     continue reloading.
+  4. On Fault (jam / timeout), the faulted node is **halted** (latched) and
+     stops reloading; the other nodes keep free-feeding. The node resumes only
+     after an operator **Recover** (``on_recover`` re-dispenses it).
   5. End after ``duration`` and/or when total pellets presented reaches
      ``max_pellets``.
 
 Usage::
 
-    from vfm_gui.experiment.templates.free_feeding import build
+    from sfm_gui.experiment.templates.free_feeding import build
 
     exp = build(nodes=[1, 2, 3], reload_delay_s=2.0, hours=12)
     exp.run(interface="vcan0")
@@ -31,13 +31,11 @@ def build(
     nodes: Optional[Sequence[int]] = None,
     *,
     name: str = "free_feeding",
-    reload_delay_s: float = 2.0,
+    reload_delay_s: float = 30.0,
     hours: float = 0.0,
     minutes: float = 0.0,
     seconds: float = 0.0,
     max_pellets: Optional[int] = None,
-    pulse_bnc_on_dispense: bool = False,
-    bnc_pulse_us: int = 100,
 ) -> Experiment:
     """
     Build a free-feeding Experiment.
@@ -52,10 +50,6 @@ def build(
         Session duration (combined). 0 = no duration limit.
     max_pellets:
         End when this many pellets have been presented (None = no cap).
-    pulse_bnc_on_dispense:
-        If True, pulse BNC OUT whenever a dispense is issued.
-    bnc_pulse_us:
-        BNC OUT pulse width in microseconds.
     """
     node_list = list(nodes) if nodes else [1, 2, 3]
     exp = Experiment(nodes=node_list, name=name)
@@ -65,10 +59,8 @@ def build(
         ctx.log("free_feeding_start", nodes=ctx.nodes, reload_delay_s=reload_delay_s)
         for n in ctx.nodes:
             ctx.dispense(n)
-            if pulse_bnc_on_dispense:
-                ctx.bnc_pulse(bnc_pulse_us)
 
-    @exp.on_access_attempt
+    @exp.on_catch_attempt
     def _attempted(ctx, ev):
         ctx.incr("retrieval_attempts")
         ctx.log("retrieval_attempt", node=ev.node_id)
@@ -85,13 +77,12 @@ def build(
                 return
             ctx.log("reload_dispense", node=node_id)
             ctx.dispense(node_id)
-            if pulse_bnc_on_dispense:
-                ctx.bnc_pulse(bnc_pulse_us)
 
         if reload_delay_s <= 0:
             _do_reload()
         else:
-            ctx.after(reload_delay_s, _do_reload)
+            # Node-scoped so a fault on this node cancels its pending reload.
+            ctx.after(reload_delay_s, _do_reload, node=node_id)
 
     @exp.on_pellet_presented
     def _presented(ctx, ev):
@@ -104,12 +95,20 @@ def build(
 
     @exp.on_fault
     def _fault(ctx, ev):
-        """Jam/timeout = no pellet delivered; halt the whole free-feeding run."""
+        """
+        Jam/timeout on a node = no pellet delivered. The runner has already
+        halted just this node (cancels its reload, makes its dispenses no-ops);
+        the other nodes keep free-feeding. The node stays latched until an
+        operator Recover — we only log here.
+        """
         fault_code = ev.data.get("fault_code")
         ctx.log("fault", node=ev.node_id, fault_code=fault_code)
-        # Stop any in-progress dispense on every node and cancel reload timers.
-        ctx.broadcast_abort()
-        ctx.stop(reason=f"fault_node_{ev.node_id}_{fault_code}")
+
+    @exp.on_recover
+    def _recovered(ctx, ev):
+        """Operator cleared the fault — resume this node's feeding cycle."""
+        ctx.log("recovered", node=ev.node_id)
+        ctx.dispense(ev.node_id)
 
     @exp.on_end
     def _end(ctx):

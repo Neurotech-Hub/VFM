@@ -2,7 +2,7 @@
 
 One-time system configuration to bring up the MCP2515 CAN controller on the
 custom base station HAT as a standard SocketCAN `can0` interface. Do this
-once per Raspberry Pi before running the VFM Developer GUI (`tools/dev_gui`)
+once per Raspberry Pi before running the SFM Developer GUI (`tools/dev_gui`)
 against real hardware.
 
 ## Hardware reference
@@ -77,7 +77,7 @@ heartbeat frames at 1 Hz once the node is assigned an ID.
 
 ## 4. Run the GUI
 
-Once `can0` is up, the VFM Developer GUI works exactly as documented in
+Once `can0` is up, the SFM Developer GUI works exactly as documented in
 [tools/dev_gui/README.md](../README.md) — no additional configuration is
 needed; `CanManager` opens `can0` directly via SocketCAN.
 

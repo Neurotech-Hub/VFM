@@ -32,7 +32,7 @@ class EventKind(Enum):
     # Direct CAN events
     PELLET_LOADED = auto()
     PELLET_PRESENTED = auto()
-    ACCESS_ATTEMPT = auto()
+    CATCH_ATTEMPT = auto()
     FAULT = auto()
     LOWERING = auto()
     LOADING = auto()
@@ -47,6 +47,7 @@ class EventKind(Enum):
     DOME_CLOSED = auto()
     NODE_ONLINE = auto()
     NODE_OFFLINE = auto()
+    NODE_RECOVERED = auto()  # operator cleared a node's fault (see recover_node)
 
     # Base-station / session
     BNC_IN = auto()
@@ -59,7 +60,7 @@ class EventKind(Enum):
 _CAN_EVENT_TO_KIND: Dict[CanEvent, EventKind] = {
     CanEvent.PelletLoaded: EventKind.PELLET_LOADED,
     CanEvent.PelletPresented: EventKind.PELLET_PRESENTED,
-    CanEvent.AccessAttempt: EventKind.ACCESS_ATTEMPT,
+    CanEvent.CatchAttempt: EventKind.CATCH_ATTEMPT,
     CanEvent.Fault: EventKind.FAULT,
     CanEvent.Lowering: EventKind.LOWERING,
     CanEvent.Loading: EventKind.LOADING,

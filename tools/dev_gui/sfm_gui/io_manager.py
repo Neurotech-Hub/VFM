@@ -68,15 +68,19 @@ class BNCInputConfig:
     """
     Describes what should happen when a BNC input edge is detected.
 
-    ``action`` / ``action_params`` are free-form placeholders, not a fixed
-    enum — the GUI is responsible for offering/interpreting whatever action
-    the user types (e.g. "dispense_all") and for dispatching it when an edge
-    fires. Unrecognized values are simply logged, ready to be wired up later.
+    Each edge has its own action so the user can, e.g., start the experiment on
+    the rising edge and stop it on the falling edge. An empty action for an edge
+    means "do nothing on that edge" (edges are independently optional).
+
+    ``rising_action`` / ``falling_action`` are free-form placeholders, not a
+    fixed enum — the GUI offers/interprets whatever action string it supports
+    (e.g. "dispense_all", "start_experiment") and dispatches it when the
+    matching edge fires. Unrecognized values are simply logged.
     """
     label: str = ""
     enabled: bool = False
-    edge: str = "rising"                 # "rising" | "falling" | "both"
-    action: str = ""                     # placeholder — GUI-defined/free text
+    rising_action: str = ""              # action on rising edge ("" = none)
+    falling_action: str = ""             # action on falling edge ("" = none)
     action_params: dict = field(default_factory=dict)
 
 
@@ -88,10 +92,11 @@ class BNCOutputConfig:
     Like ``BNCInputConfig``, ``trigger`` / ``trigger_params`` are free-form
     placeholders — the GUI owns matching CAN/system events against the
     configured trigger and calling ``IOManager.pulse_bnc_out()``.
+    pulse_width_us is stored internally as microseconds but displayed as milliseconds in the GUI.
     """
     label: str = ""
     enabled: bool = False
-    pulse_width_us: int = 100
+    pulse_width_us: int = 10000
     trigger: str = ""                    # placeholder — GUI-defined/free text
     trigger_params: dict = field(default_factory=dict)
 
@@ -228,7 +233,7 @@ class IOManager:
             self._write_output(PIN_BNC_OUT, False)
             self._bnc_out_state = False
 
-        threading.Thread(target=_run, daemon=True, name="vfm-bnc-pulse").start()
+        threading.Thread(target=_run, daemon=True, name="sfm-bnc-pulse").start()
 
     # ------------------------------------------------------------------
     # User button
@@ -271,7 +276,7 @@ class IOManager:
         try:
             request = gpiod.request_lines(
                 chip_path,
-                consumer="vfm-io-manager",
+                consumer="sfm-io-manager",
                 config={
                     PIN_BNC_IN1: gpiod.LineSettings(
                         direction=Direction.INPUT, edge_detection=Edge.BOTH, bias=Bias.PULL_DOWN
@@ -296,7 +301,7 @@ class IOManager:
         self._request = request
         self._edge_thread_stop.clear()
         threading.Thread(
-            target=self._gpiod_edge_loop, args=(request,), daemon=True, name="vfm-gpiod-edges"
+            target=self._gpiod_edge_loop, args=(request,), daemon=True, name="sfm-gpiod-edges"
         ).start()
         return True
 

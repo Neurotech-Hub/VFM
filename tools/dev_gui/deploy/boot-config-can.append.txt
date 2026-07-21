@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# VFM Base Station — CAN HAT device tree overlay
+# VFM Base Station — CAN HAT device tree overlay and GPIO configuration
 #
 # Append the lines below to /boot/firmware/config.txt on the Raspberry Pi 5
 # (Raspberry Pi OS Bookworm or later), then reboot.
@@ -16,6 +16,11 @@
 # spimaxfrequency=10000000 -> 10 MHz SPI clock (MCP2515 max is ~10 MHz at 5V,
 #                         conservative for reliability with cable/HAT stray
 #                         capacitance).
+#
+# gpio=6=op,dl          -> BNC_OUT pin is pulled high by hardware at boot. This
+#                         drives it low as early as possible to prevent
+#                         erroneous pulses.
 # -----------------------------------------------------------------------------
 dtparam=spi=on
 dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=5,spimaxfrequency=10000000
+gpio=6=op,dl
